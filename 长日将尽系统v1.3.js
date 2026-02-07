@@ -7752,38 +7752,6 @@ cmd_reset_sighting_count.solve = (ctx, msg) => {
 ext.cmdMap["重置目击报告"] = cmd_reset_sighting_count;
 
 // ========================
-// 💬 帮助信息
-// ========================
-
-// 目击报告系统帮助
-let cmd_sighting_help = seal.ext.newCmdItemInfo();
-cmd_sighting_help.name = "目击报告帮助";
-cmd_sighting_help.help = "目击报告帮助 - 显示目击报告系统所有指令";
-
-cmd_sighting_help.solve = (ctx, msg) => {
-    let rep = "👀 目击报告系统指令：\n\n";
-    
-    rep += "👤 玩家指令：\n";
-    rep += "  。目击报告状态 - 查看目击报告系统状态和个人统计\n\n";
-    
-    rep += "⚙️ 管理员指令：\n";
-    rep += "  。目击报告开关 开启/关闭 - 启用或禁用目击报告系统\n";
-    rep += "  。设置目击报告 参数名 参数值 - 设置目击报告系统参数\n";
-    rep += "  。重置目击报告 - 清空所有角色的今日目击报告计数\n";
-    
-    rep += "📖 功能说明：\n";
-    rep += "• 目击报告系统在地点系统开启时可用\n";
-    rep += "• 当成功分配小群后，系统会检查同一时间段同一地点是否有其他约会\n";
-    rep += "• 时间段部分重合（默认30%以上）即会触发目击报告\n";
-    rep += "• 报告会发送到参与者的个人群\n";
-    rep += "• 每人每天有报告次数限制（默认3次）\n";
-    
-    seal.replyToSender(ctx, msg, rep);
-    return seal.ext.newCmdExecuteResult(true);
-};
-ext.cmdMap["目击报告帮助"] = cmd_sighting_help;
-
-// ========================
 // 🎯 基础设置指令（添加微信功能）
 // ========================
 
@@ -8726,8 +8694,8 @@ function saveUserStats(stats) {
 }
 
 /**
- * 初始化群组计时器（修正版）
- * 修改：过滤掉已拒绝的参与者
+ * 初始化群组计时器（最终优化版）
+ * 修改：将被发起者初始设为 replied，取消 waiting 状态
  */
 function initGroupTimer(platform, groupId, subtype, participants, initiator) {
     const settings = getMonitorSettings();
@@ -8746,18 +8714,15 @@ function initGroupTimer(platform, groupId, subtype, participants, initiator) {
     if (multiGroup && multiGroup.targetList) {
         activeParticipants = participants.filter(participant => {
             const status = multiGroup.targetList[participant];
-            // 只包括已接受和待回应的参与者
             return status === "accepted" || status === null;
         });
     }
     
-    // 如果没有活跃参与者，不创建计时器
     if (activeParticipants.length === 0) return;
     
     const timers = getGroupTimers();
     const now = Date.now();
     
-    // 根据类型获取超时时间
     const getTimeout = (type) => {
         switch(type) {
             case "电话": return settings.timeout_phone;
@@ -8768,140 +8733,124 @@ function initGroupTimer(platform, groupId, subtype, participants, initiator) {
         }
     };
     
-    // 判断计时模式：2人使用轮流模式，多人使用独立模式
     const isTwoPerson = activeParticipants.length === 2;
     
-    // 初始化计时器状态
     const timerData = {
         platform: platform,
-        groupId: groupId,
+        groupId: String(groupId), // 强制转为字符串
         subtype: subtype,
         startTime: now,
-        participants: activeParticipants, // 使用过滤后的参与者
+        participants: activeParticipants,
         timerStatus: {},
         lastRemindTime: null,
         timeoutDuration: getTimeout(subtype),
+        // 建议：由于逻辑已统一，甚至可以不再区分 mode，但在你原有框架下我们保留它
         timerMode: isTwoPerson ? "turn_taking" : "independent"
     };
-    
-    if (isTwoPerson) {
-        // 一对一邀约：轮流模式
-        timerData.timerStatus[initiator] = {
-            status: "timing",
-            startTime: now,
-            repliedTime: null,
-            wordCount: 0,
-            remindedTimes: 0,
-            isInitiator: true
-        };
+
+    // --- 核心修改：统一分配初始状态 ---
+    activeParticipants.forEach(participant => {
+        const isInitiator = (participant === initiator);
         
-        const receiver = activeParticipants.find(p => p !== initiator);
-        if (receiver) {
-            timerData.timerStatus[receiver] = {
-                status: "waiting",
-                startTime: null,
+        if (isInitiator) {
+            // 发起人：进入计时状态（他在第一轮必须说话）
+            timerData.timerStatus[participant] = {
+                status: "timing",
+                startTime: now,
                 repliedTime: null,
+                wordCount: 0,
+                remindedTimes: 0,
+                isInitiator: true
+            };
+        } else {
+            // 被发起者：初始设为 replied（已回复）
+            // 这样他们不会触发超时提醒，直到发起人回复达标重置他们，或者他们主动抢话
+            timerData.timerStatus[participant] = {
+                status: "replied", 
+                startTime: null, // 尚未开始这一轮计时
+                repliedTime: now,
                 wordCount: 0,
                 remindedTimes: 0,
                 isInitiator: false
             };
         }
-    } else {
-        // 多人邀约：独立模式
-        activeParticipants.forEach(participant => {
-            const isInitiator = participant === initiator;
-            timerData.timerStatus[participant] = {
-                status: "timing", // 独立模式中，所有人一开始都计时
-                startTime: now,
-                repliedTime: null,
-                wordCount: 0,
-                remindedTimes: 0,
-                isInitiator: isInitiator
-            };
-        });
-    }
+    });
     
-    timers[groupId] = timerData;
+    timers[String(groupId)] = timerData; 
     saveGroupTimers(timers);
     
-    console.log(`[监听系统] 初始化群组 ${groupId} 的计时器，参与者：${activeParticipants.join(',')}，模式：${isTwoPerson ? '轮流模式' : '独立模式'}`);
+    console.log(`[监听系统] 初始化成功。发起者 [${initiator}] 计时中，其余 ${activeParticipants.length - 1} 人设为备战(replied)状态。`);
 }
 
-/**
- * 处理回复（监听消息时调用）
- * 修改：独立模式下，每个人回复后保持"已回复"状态，不改变其他人状态
- */
 function handleReply(platform, groupId, roleName, message) {
-
     const settings = getMonitorSettings();
-    if (!settings.enabled) {
-        return false;
-    }
+    if (!settings.enabled) return false;
     
     const timers = getGroupTimers();
-    const timer = timers[groupId];
-    if (!timer) {
-        return false;
-    }
+    const timer = timers[String(groupId)]; 
+    if (!timer) return false;
     
     const roleStatus = timer.timerStatus[roleName];
-    if (!roleStatus) {
-        console.warn(`[监听系统] 处理失败: 角色 [${roleName}] 不在当前计时的参与者名单中`);
-        return false;
+    if (!roleStatus) return false;
+
+    // --- 【关键修改】全模式状态自动回转 ---
+    // 无论什么模式，如果角色当前是 replied 状态（含初始化的被发起者），
+    // 只要他说话，就临时切回 timing 状态进行字数校验。
+    if (roleStatus.status === "replied") {
+        roleStatus.status = "timing";
     }
+
+    // 此时 waiting 状态或不达标的状态依然会被拦截
+    if (roleStatus.status !== "timing") return false;
     
-    // 检查状态
-    console.log(`[监听系统] 角色 [${roleName}] 当前状态: ${roleStatus.status}, 模式: ${timer.timerMode}`);
-    
-    if (roleStatus.status !== "timing") {
-        console.warn(`[监听系统] 忽略回复: [${roleName}] 的状态不是 "timing" (计时中)，当前状态为 "${roleStatus.status}"`);
-        return false;
-    }
-    
-    // 计算字数
     const wordCount = countWords(message);
     const minWords = getMinWords(timer.subtype);
-    console.log(`[监听系统] 字数统计: 当前输入 ${wordCount} 字, 最低要求 ${minWords} 字`);
     
-    // 检查是否达到最低字数要求
+    // 如果字数不够，我们要把状态还原回 replied，防止其意外开启计时
     if (wordCount < minWords) {
-        console.warn(`[监听系统] 忽略回复: 字数不足 (需要 ${minWords} 字，实际 ${wordCount} 字)`);
+        // 如果是原本就在 replied 状态且字数不足，维持 replied
+        // 这里可以根据需求决定是否记录 roleStatus.status 的原始值
         return false;
     }
-    
+
     // --- 校验通过，开始更新数据 ---
+    const now = Date.now();
     
-    // 记录回复
-    roleStatus.status = "replied";
-    roleStatus.repliedTime = Date.now();
-    roleStatus.wordCount = wordCount;
-    
-    // 更新用户统计
-    updateUserStats(platform, roleName, wordCount, roleStatus.startTime, roleStatus.repliedTime);
-    
-    // 根据计时模式处理下一步
-    if (timer.timerMode === "turn_taking") {
-        const otherParticipant = timer.participants.find(p => p !== roleName);
-        
-        if (otherParticipant) {
-            const otherStatus = timer.timerStatus[otherParticipant];
-            if (otherStatus) {
-                otherStatus.status = "timing";
-                otherStatus.startTime = Date.now();
-                otherStatus.repliedTime = null;
-                otherStatus.wordCount = 0;
-                otherStatus.remindedTimes = 0;
-                console.log(`[监听系统] 轮流模式: 下一位角色 [${otherParticipant}] 已进入计时状态`);
+    // 如果 startTime 为空（比如初始为 replied 的人第一次说话），用当前时间作为起始点
+    const startTime = roleStatus.startTime || now;
+    updateUserStats(platform, roleName, wordCount, startTime, now);
+
+    if (timer.timerMode === "independent") {
+        // --- 多人模式：精准重置 ---
+        for (const name in timer.timerStatus) {
+            const status = timer.timerStatus[name];
+            // 1. 刚才说话的那个人：重置进入新一轮
+            // 2. 之前已经回过的人(replied)：重置进入新一轮（被刚才说话的人“激活”了）
+            // 3. 还没回的人(timing)：保持原样，不刷新 startTime，继续催促
+            if (name === roleName || status.status === "replied") {
+                status.status = "timing";
+                status.startTime = now; 
+                status.repliedTime = null;
+                status.wordCount = 0;
+                status.remindedTimes = 0;
             }
-        } else {
-            console.log(`[监听系统] 轮流模式: 未找到另一位参与者`);
         }
     } else {
-        console.log(`[监听系统] 独立模式: 角色 [${roleName}] 回复成功，不影响其他人的计时状态`);
+        // --- 两人模式：严格轮流但支持“抢话” ---
+        roleStatus.status = "replied";
+        roleStatus.repliedTime = now;
+        
+        const otherName = timer.participants.find(p => p !== roleName);
+        if (otherName && timer.timerStatus[otherName]) {
+            const other = timer.timerStatus[otherName];
+            // 无论对方在做什么，轮到对方说话了
+            other.status = "timing";
+            other.startTime = now;
+            other.remindedTimes = 0;
+        }
     }
     
-    saveGroupTimers(timers);
-    
+    saveGroupTimers(timers); // 使用你定义的保存函数
     return true;
 }
 
@@ -8910,18 +8859,16 @@ function handleReply(platform, groupId, roleName, message) {
  */
 function countWords(text) {
     if (!text) return 0;
-    
     // 移除CQ码
-    const cleanText = text.replace(/\[CQ:[^\]]*\]/g, '');
+    const cleanText = text.replace(/\[CQ:[^\]]*\]/g, '').trim();
+    if (!cleanText) return 0;
     
-    // 统计中文字符
+    // 【修改点】统计中文字符 + 英文单词/数字/符号Token
     const chineseChars = (cleanText.match(/[\u4e00-\u9fa5]/g) || []).length;
+    const otherTokens = cleanText.replace(/[\u4e00-\u9fa5]/g, '').trim().split(/\s+/).filter(t => t.length > 0).length;
     
-    // 统计英文单词（按空格分割）
-    const englishText = cleanText.replace(/[\u4e00-\u9fa5]/g, '');
-    const englishWords = englishText.trim().split(/\s+/).filter(word => word.length > 0).length;
-    
-    return chineseChars + englishWords;
+    // 取逻辑统计值和物理长度的平衡，确保有内容就不会是0
+    return Math.max(chineseChars + otherTokens, 1);
 }
 
 /**
