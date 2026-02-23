@@ -18,14 +18,15 @@ seal.ext.registerStringConfig(ext, "ws地址", "ws://localhost:3001");
     seal.ext.registerStringConfig(ext, "ws Access token", '', "输入与上方端口对应的token，没有则留空");
     seal.ext.registerStringConfig(ext, "群管插件使用需要满足的条件", '1', "使用豹语表达式，例如：$t群号_RAW=='2001'，1为所有群可用");
     seal.ext.registerBoolConfig(ext, "开启现实时段校验", false, "是否限制玩家只能发起与当前现实时间对应的剧情时段邀约");
+    //这些要删掉
     seal.ext.registerIntConfig(ext, "mailCooldown", 60, "寄信冷却时间（分钟）", "寄信行为之间的最小间隔时间");
     seal.ext.registerIntConfig(ext, "giftCooldown", 30, "礼物赠送冷却时间（分钟）", "两次赠送礼物之间的最小间隔时间");
     seal.ext.registerIntConfig(ext, "giftDailyLimit", 100, "每日礼物额度上限", "每天可赠送礼物的最大数量");
-    // 添加匿名信配置
     seal.ext.registerIntConfig(ext, "secretLetterCooldown", 2, "匿名信冷却时间（分钟）", "发送匿名信的最小间隔时间");
     seal.ext.registerIntConfig(ext, "secretLetterDailyLimit", 30, "匿名信每日次数上限", "每天可发送匿名信的最大数量");
     seal.ext.registerIntConfig(ext, "secretLetterRevealChance", 15, "匿名信暴露身份概率（0-100）", "发送匿名信时暴露身份的概率，设置为0则不暴露");
     seal.ext.registerIntConfig(ext, "secretLetterPublicChance", 50, "匿名信公开概率（0-100）", "匿名信被公开到公告群的几率，设置为0则不公开");
+    //这些要删掉
     seal.ext.registerIntConfig(ext, "giftMode", 0, "送礼模式：0-自定义+预设，1-只允许预设，2-只允许自定义", "控制送礼功能的模式");
     let whiteList = 0;
 function ws(postData, ctx, msg, successreply) {
@@ -2348,8 +2349,8 @@ cmd_send_gift.solve = (ctx, msg, cmdArgs) => {
 
   // 4. 冷却与限次检查 (保持不变)
   const gameDay = ext.storageGet("global_days") || "D0";
-  const dailyLimit = seal.ext.getIntConfig(ext, "giftDailyLimit") || 100;
-  const cooldownMin = seal.ext.getIntConfig(ext, "giftCooldown") || 2;
+  const dailyLimit = parseInt(ext.storageGet("giftDailyLimit") || "100");
+  const cooldownMin = parseInt(ext.storageGet("giftCooldown") || "30")
   
   let globalStats = JSON.parse(ext.storageGet("global_gift_stats") || "{}");
   let globalCooldowns = JSON.parse(ext.storageGet("global_gift_cooldowns") || "{}");
@@ -5365,8 +5366,8 @@ cmd_send_secretletter.solve = (ctx, msg, cmdArgs) => {
 
     // 3. 【方案 C 核心逻辑】限次与冷却检查
     const gameDay = ext.storageGet("global_days") || "D0";
-    const dailyLimit = seal.ext.getIntConfig(ext, "secretLetterDailyLimit") || 5;
-    const cooldownMin = seal.ext.getIntConfig(ext, "secretLetterCooldown") || 10;
+    let secretLimit = parseInt(ext.storageGet("secretLetterDailyLimit") || "30");
+    const cooldownMin = parseInt(ext.storageGet("secretLetterCooldown") || "2")
     
     // 从大表中读取
     let globalStats = JSON.parse(ext.storageGet("global_secret_letter_stats") || "{}");
@@ -5397,7 +5398,7 @@ cmd_send_secretletter.solve = (ctx, msg, cmdArgs) => {
     }
 
     // 4. 发送处理 (暴露身份概率逻辑)
-    const revealChance = seal.ext.getIntConfig(ext, "secretLetterRevealChance") || 0;
+    let revealChance = parseInt(ext.storageGet("secretLetterRevealChance") || "15");
     const isRevealed = Math.random() * 100 < revealChance;
     const finalSignature = isRevealed ? `落款：${sendname}（似曾相识的笔迹…）` : `（落款人不详）`;
 
@@ -5425,7 +5426,7 @@ cmd_send_secretletter.solve = (ctx, msg, cmdArgs) => {
 
     // 7. 公开发送逻辑 (如果有开启)
     if (JSON.parse(ext.storageGet("secret_letter_public_send") || "false")) {
-        const publicChance = seal.ext.getIntConfig(ext, "secretLetterPublicChance") || 0;
+        let publicChance = parseInt(ext.storageGet("secretLetterPublicChance") || "50");
         if (Math.random() * 100 <= publicChance) {
             const adminGroupId = JSON.parse(ext.storageGet("adminAnnounceGroupId") || "null");
             if (adminGroupId) {
@@ -5982,7 +5983,7 @@ cmd_send_chaos_letter.solve = (ctx, msg, cmdArgs) => {
   const cooldownKey = `chaos_letter_cooldown_${platform}:${uid}`;
   const lastSent = parseInt(ext.storageGet(cooldownKey) || "0");
   const now = Date.now();
-  let mailCooldownMin = seal.ext.getIntConfig(ext, "mailCooldown");
+  let mailCooldownMin = parseInt(ext.storageGet("mailCooldown") || "60")
   const cooldownDuration = mailCooldownMin * 60 * 1000;
 
   if (now - lastSent < cooldownDuration) {
@@ -7551,783 +7552,309 @@ function triggerSightingCheck(platform, day, time, place, participants, groupId,
 }
 
 // ========================
-// 🎮 玩家指令
+// 📦 恋综系统分类控制台 (完整版)
 // ========================
 
-// 查看目击报告状态
-let cmd_view_sighting_status = seal.ext.newCmdItemInfo();
-cmd_view_sighting_status.name = "目击报告状态";
-cmd_view_sighting_status.help = "目击报告状态 - 查看目击报告系统状态和个人统计";
+let cmd_settings = seal.ext.newCmdItemInfo();
+cmd_settings.name = '设置';
+cmd_settings.help = `==== 📺 恋综系统控制台 ====
+使用方法：
+.设置 基础  - 名字、群号、核心功能开关
+.设置 互动  - 冷却时间、邀约时长、目击上限
+.设置 信件  - 寄信混乱度、匿名上限、送达时间
+.设置 公告  - 各种公开广播的概率与开关
 
-cmd_view_sighting_status.solve = (ctx, msg) => {
-    const platform = msg.platform;
-    const uid = msg.sender.userId.replace(`${platform}:`, "");
-    
-    // 获取当前用户角色名
-    const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
-    const roleName = Object.entries(a_private_group[platform] || {})
-        .find(([_, val]) => val[0] === uid)?.[0];
-    
-    const sightingConfig = getSightingConfig();
-    const placeConfig = getPlaceSystemConfig();
-    const todayCount = roleName ? getUserSightingCountToday(platform, roleName) : 0;
-    
-    let rep = "👀 目击报告系统状态：\n\n";
-    // 计算剩余次数
-    const remaining = Math.max(0, sightingConfig.max_reports_per_day - todayCount);
-    rep += `📉 今日剩余次数：${remaining}次\n`;
-    
-    rep += `\n💡 功能说明：当您在小群约会时，系统会检查同一时间段同一地点是否有其他约会。\n`;
-    rep += `只要有时间重叠，就可能收到目击报告或被别人目击。`;
-    
-    seal.replyToSender(ctx, msg, rep);
-    return seal.ext.newCmdExecuteResult(true);
-};
-ext.cmdMap["目击报告状态"] = cmd_view_sighting_status;
+💡 提示：输入对应指令后，复制弹出的模板进行修改即可。`;
 
-// ========================
-// ⚙️ 管理员指令
-// ========================
-
-// 重置目击报告计数
-let cmd_reset_sighting_count = seal.ext.newCmdItemInfo();
-cmd_reset_sighting_count.name = "重置目击报告";
-cmd_reset_sighting_count.help = "重置目击报告 - 清空所有角色的今日目击报告计数";
-
-cmd_reset_sighting_count.solve = (ctx, msg) => {
+cmd_settings.solve = function(ctx, msg, argv) {
     if (!isUserAdmin(ctx, msg)) {
-        seal.replyToSender(ctx, msg, "该指令仅限管理员使用");
-        return seal.ext.newCmdExecuteResult(true);
-    }
-
-    const today = new Date().toISOString().slice(0, 10);
-    const sightingCount = JSON.parse(ext.storageGet("sighting_daily_count") || "{}");
-    
-    const todayCount = sightingCount[today] ? Object.keys(sightingCount[today]).length : 0;
-    
-    if (todayCount > 0) {
-        delete sightingCount[today];
-        ext.storageSet("sighting_daily_count", JSON.stringify(sightingCount));
-        seal.replyToSender(ctx, msg, `✅ 已重置今日目击报告计数，清除了 ${todayCount} 个角色的记录`);
-    } else {
-        seal.replyToSender(ctx, msg, "📭 今日暂无目击报告记录");
-    }
-    
-    return seal.ext.newCmdExecuteResult(true);
-};
-ext.cmdMap["重置目击报告"] = cmd_reset_sighting_count;
-
-// ========================
-// 🎯 基础设置指令（添加微信功能）
-// ========================
-
-let cmd_basic_settings = seal.ext.newCmdItemInfo();
-cmd_basic_settings.name = '基础设置';
-cmd_basic_settings.help = `查看或设置基础参数
-
-格式1：.基础设置 - 查看当前设置
-格式2：.基础设置 
-【参数名1】参数值1
-【参数名2】参数值2
-...
-
-基础参数模板（复制并修改后发送）：
-.基础设置
-【礼物】开启
-【发起邀约】开启
-【寄信】开启
-【心愿】开启
-【心动信】开启
-【微信】开启
-【心愿公开提醒】关闭
-【关系线系统】开启
-【关系线上限】5
-【恋综名】未设置
-【点歌群】未设置
-【后台群】未设置
-【公告群】未设置
-
-参数说明：
-• 开关类：开启/关闭
-• 数字类：直接填写数字
-• 文本类：任意文本或'未设置'
-• 群组类：填写群号或'未设置'`;
-
-cmd_basic_settings.solve = function(ctx, msg, argv) {
-    if (!isUserAdmin(ctx, msg)) {
-        seal.replyToSender(ctx, msg, "该指令仅限管理员使用");
+        seal.replyToSender(ctx, msg, "❌ 权限不足：该指令仅限管理员使用");
         return seal.ext.newCmdExecuteResult(true);
     }
 
     const rawMessage = msg.message.trim();
-    
-    // 检查是否包含换行符（表示有参数设置）
+    const subCmd = argv.getArgN(1);
+
+    // 提交模式：识别首行标识符
     if (rawMessage.includes('\n')) {
-        return applyBasicSettings(ctx, msg, rawMessage);
-    } else {
-        return showBasicSettings(ctx, msg);
+        const firstLine = rawMessage.split('\n')[0];
+        if (firstLine.includes('基础设置')) return handleApply(ctx, msg, rawMessage, applyBasicParam);
+        if (firstLine.includes('互动设置')) return handleApply(ctx, msg, rawMessage, applyInteractionParam);
+        if (firstLine.includes('信件设置')) return handleApply(ctx, msg, rawMessage, applyLetterParam);
+        if (firstLine.includes('公告设置')) return handleApply(ctx, msg, rawMessage, applyPublicParam);
+        return seal.ext.newCmdExecuteResult(true);
     }
+
+    // 查询模式
+    switch (subCmd) {
+        case '基础': return showBasicSettings(ctx, msg);
+        case '互动': return showInteractionSettings(ctx, msg);
+        case '信件': return showLetterSettings(ctx, msg);
+        case '公告': return showPublicSettings(ctx, msg);
+        default: seal.replyToSender(ctx, msg, cmd_settings.help);
+    }
+    return seal.ext.newCmdExecuteResult(true);
 };
 
-// 显示基础设置
+// --- ⚙️ 通用解析引擎 ---
+function handleApply(ctx, msg, rawMessage, paramHandler) {
+    const lines = rawMessage.split('\n');
+    const success = []; const error = [];
+    for (let i = 1; i < lines.length; i++) {
+        let line = lines[i].trim();
+        if (!line) continue;
+        const match = line.match(/^【([^】]+)】\s*(.+)$/);
+        if (!match) continue;
+        const result = paramHandler(match[1].trim(), match[2].trim());
+        if (result.success) success.push(result.message); else error.push(result.message);
+    }
+    let reply = `✅ 处理完成（成功 ${success.length} 项）\n` + success.join('\n');
+    if (error.length > 0) reply += `\n\n❌ 失败项：\n` + error.join('\n');
+    seal.replyToSender(ctx, msg, reply);
+    return seal.ext.newCmdExecuteResult(true);
+}
+
+// --- 1️⃣ 基础设置模块 ---
 function showBasicSettings(ctx, msg) {
-    const results = [];
-    
-    results.push("🎯 当前基础设置（复制以下内容进行修改）");
-    results.push("─────────────────────────────────────────────");
-    results.push(".基础设置");
-    
-    // 1. 功能模块开关
-    const featureConfig = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
-    const defaultFeatureConfig = {
-        enable_general_letter: true,
-        enable_general_gift: true,
-        enable_general_appointment: true,
-        enable_chaos_letter: true,
-        enable_secret_letter: true,
-        enable_wish_system: true,
-        enable_lovemail: true,
-        enable_wechat: true  // 添加微信功能
-    };
-    const mergedFeatureConfig = { ...defaultFeatureConfig, ...featureConfig };
-    
-    // 基础设置只显示指定功能
-    const basicFeatures = {
-        '礼物': 'enable_general_gift',
-        '发起邀约': 'enable_general_appointment',
-        '寄信': 'enable_chaos_letter',
-        '心愿': 'enable_wish_system',
-        '心动信': 'enable_lovemail',
-        '微信': 'enable_wechat'  // 添加微信功能
-    };
-    
-    for (const [displayName, configKey] of Object.entries(basicFeatures)) {
-        const value = mergedFeatureConfig[configKey] !== undefined ? mergedFeatureConfig[configKey] : defaultFeatureConfig[configKey];
-        results.push(`【${displayName}】${value ? '开启' : '关闭'}`);
-    }
-    
-    // 2. 心愿公开提醒（原心愿公告）
-    const wishPublicSend = JSON.parse(ext.storageGet("wish_public_send") || "false");
-    results.push(`【心愿公开提醒】${wishPublicSend ? '开启' : '关闭'}`);
-    
-    // 3. 关系线系统开关
-    const relationshipEnabled = JSON.parse(ext.storageGet("relationship_system_enabled") || "true");
-    results.push(`【关系线系统】${relationshipEnabled ? '开启' : '关闭'}`);
-    
-    // 4. 关系线上限
-    const maxRelationships = parseInt(ext.storageGet("max_relationships_per_user") || "5");
-    results.push(`【关系线上限】${maxRelationships}`);
-    
-    // 5. 恋综名
-    const loveShowName = JSON.parse(ext.storageGet("love_show_name") || "\"未设置\"");
-    results.push(`【恋综名】${loveShowName}`);
-    
-    // 6. 群组设置
-    const groupDisplay = {
-        'song_group_id': '点歌群',
-        'background_group_id': '后台群',
-        'adminAnnounceGroupId': '公告群'
-    };
-
-    // 获取心动信送达时间 (默认晚上 22:00)
-    const lovemailTime = JSON.parse(ext.storageGet("lovemail_delivery_time") || "\"22:00\"");
-    results.push(`【心动信送达时间】${lovemailTime}`);
-    
-    for (const [key, name] of Object.entries(groupDisplay)) {
-        const value = JSON.parse(ext.storageGet(key) || "null");
-        results.push(`【${name}】${value || '未设置'}`);
-    }
-    
-    results.push("");
-    results.push("💡 使用方法：");
-    results.push("1. 复制以上所有行");
-    results.push("2. 修改需要调整的参数值");
-    results.push("3. 发送：.基础设置 后粘贴修改后的内容");
-    
+    const feature = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
+    const results = [
+        "🎯 基础设置当前配置", "────────────────", ".设置 基础设置",
+        `【恋综名】${JSON.parse(ext.storageGet("love_show_name") || "\"未设置\"")}`,
+        `【微信】${feature.enable_wechat !== false ? '开启' : '关闭'}`,
+        `【礼物】${feature.enable_general_gift !== false ? '开启' : '关闭'}`,
+        `【心愿】${feature.enable_wish_system !== false ? '开启' : '关闭'}`,
+        `【发起邀约】${feature.enable_general_appointment !== false ? '开启' : '关闭'}`,
+        `【关系线系统】${JSON.parse(ext.storageGet("relationship_system_enabled") || "true") ? '开启' : '关闭'}`,
+        `【关系线上限】${ext.storageGet("max_relationships_per_user") || "5"}`,
+        `【点歌群】${JSON.parse(ext.storageGet("song_group_id") || "\"未设置\"")}`,
+        `【后台群】${JSON.parse(ext.storageGet("background_group_id") || "\"未设置\"")}`,
+        `【公告群】${JSON.parse(ext.storageGet("adminAnnounceGroupId") || "\"未设置\"")}`,
+        `【水群】${JSON.parse(ext.storageGet("water_group_id") || "\"未设置\"")}`
+    ];
     seal.replyToSender(ctx, msg, results.join('\n'));
-    return seal.ext.newCmdExecuteResult(true);
 }
 
-// 应用基础设置
-function applyBasicSettings(ctx, msg, rawMessage) {
-    const lines = rawMessage.split('\n');
-    const successResults = [];
-    const errorResults = [];
-    const warningResults = [];
-    let paramCount = 0;
-    
-    // 跳过第一行（指令本身）
-    for (let i = 1; i < lines.length; i++) {
-        let line = lines[i].trim();
-        if (!line) continue;
-        
-        // 解析每行的参数（格式：【参数名】参数值）
-        const match = line.match(/^【([^】]+)】\s*(.+)$/);
-        if (!match) {
-            warningResults.push(`⚠️ 格式错误：${line}`);
-            continue;
-        }
-        
-        const paramName = match[1].trim();
-        const paramValue = match[2].trim();
-        paramCount++;
-        
-        // 应用单个基础参数设置
-        const result = applyBasicParam(paramName, paramValue);
-        if (result.success) {
-            successResults.push(result.message);
-        } else {
-            errorResults.push(result.message);
-        }
+function applyBasicParam(name, val) {
+    const featureMap = { '微信': 'enable_wechat', '礼物': 'enable_general_gift', '心愿': 'enable_wish_system', '发起邀约': 'enable_general_appointment' };
+    if (featureMap[name]) {
+        let cfg = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
+        cfg[featureMap[name]] = (val === '开启');
+        ext.storageSet("global_feature_toggle", JSON.stringify(cfg));
+        return { success: true, message: `【${name}】已${val}` };
     }
-    
-    // 构建回复
-    let replyText = buildResultMessage("基础设置", paramCount, successResults, errorResults, warningResults);
-    
-    seal.replyToSender(ctx, msg, replyText);
-    return seal.ext.newCmdExecuteResult(true);
+    if (name === '关系线系统') { ext.storageSet("relationship_system_enabled", JSON.stringify(val === '开启')); return { success: true, message: `【${name}】已${val}` }; }
+    if (name === '恋综名') { ext.storageSet("love_show_name", JSON.stringify(val)); return { success: true, message: `【${name}】已设为 ${val}` }; }
+    if (name === '关系线上限') { ext.storageSet("max_relationships_per_user", val); return { success: true, message: `【${name}】已设为 ${val}` }; }
+    const groups = { '点歌群': 'song_group_id', '后台群': 'background_group_id', '公告群': 'adminAnnounceGroupId', '水群': 'water_group_id' };
+    if (groups[name]) { ext.storageSet(groups[name], JSON.stringify(val === '未设置' ? null : val)); return { success: true, message: `【${name}】已同步` }; }
+    return { success: false, message: `未知参数：${name}` };
 }
 
-// 应用单个基础参数
-function applyBasicParam(paramName, paramValue) {
-    // 1. 完善参数白名单
-    const basicSwitchParams = [
-        '礼物', '发起邀约', '寄信', '心愿', '心动信', '微信',
-        '心愿公开提醒', '关系线系统'
+// --- 2️⃣ 互动设置模块 (已修正为纯 Storage) ---
+function showInteractionSettings(ctx, msg) {
+    const sighting = getSightingConfig();
+    const place = getPlaceSystemConfig();
+    const duration = JSON.parse(ext.storageGet("appointment_duration_config") || "{\"phone\":29,\"private\":59}");
+    
+    const results = [
+        "🤝 互动设置当前配置", "────────────────", ".设置 互动设置",
+        `【地点系统】${place.enabled ? '开启' : '关闭'}`,
+        `【目击报告】${sighting.enabled ? '开启' : '关闭'}`,
+        `【目击每日上限】${sighting.max_reports_per_day}`,
+        `【电话最小时长】${duration.phone}`,
+        `【私密最小时长】${duration.private}`,
+        `【寄信冷却时间】${ext.storageGet("mailCooldown") || "60"}`,
+        `【送礼冷却时间】${ext.storageGet("giftCooldown") || "30"}`,
+        `【匿名信冷却时间】${ext.storageGet("secretLetterCooldown") || "2"}`,
+        `【送礼模式】${ext.storageGet("giftMode") || "0"}`,
+        `【时间重叠阈值】${Math.round(sighting.time_overlap_threshold * 100)}`,
+        `【目击报告方式】${sighting.send_to_all ? '双向通知' : '单向通知'}`,
+        `【包含已结束】${sighting.include_ended_meetings ? '是' : '否'}`
     ];
-    const basicNumberParams = ['关系线上限'];
-    const basicTextParams = ['恋综名', '心动信送达时间']; // 确认这里包含新参数
-    const basicGroupParams = ['点歌群', '后台群', '公告群'];
-    
-    // 2. 处理开关类参数
-    if (basicSwitchParams.includes(paramName)) {
-        if (paramValue !== '开启' && paramValue !== '关闭') {
-            return { success: false, message: `【${paramName}】参数值必须是"开启"或"关闭"` };
-        }
-        const value = paramValue === '开启';
-        
-        if (paramName === '心愿公开提醒') {
-            ext.storageSet("wish_public_send", JSON.stringify(value));
-        } else if (paramName === '关系线系统') {
-            ext.storageSet("relationship_system_enabled", JSON.stringify(value));
-        } else {
-            const featureMap = {
-                '礼物': 'enable_general_gift',
-                '发起邀约': 'enable_general_appointment',
-                '寄信': 'enable_chaos_letter',
-                '心愿': 'enable_wish_system',
-                '心动信': 'enable_lovemail',
-                '微信': 'enable_wechat'
-            };
-            const configKey = featureMap[paramName];
-            if (configKey) {
-                let featureConfig = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
-                featureConfig[configKey] = value;
-                ext.storageSet("global_feature_toggle", JSON.stringify(featureConfig));
-            }
-        }
-        return { success: true, message: `【${paramName}】已${value ? '开启' : '关闭'}` };
-    }
-    
-    // 3. 处理数字类参数
-    if (basicNumberParams.includes(paramName)) {
-        const numValue = parseInt(paramValue);
-        if (isNaN(numValue) || numValue < 1) {
-            return { success: false, message: `【${paramName}】参数值必须是≥1的数字` };
-        }
-        ext.storageSet("max_relationships_per_user", numValue.toString());
-        return { success: true, message: `【${paramName}】已设为 ${numValue}` };
-    }
-    
-    // 4. 处理文本类参数 (修复重点在这里)
-    if (basicTextParams.includes(paramName)) {
-        if (paramName === '恋综名') {
-            if (!paramValue.trim()) return { success: false, message: `【${paramName}】参数值不能为空` };
-            ext.storageSet("love_show_name", JSON.stringify(paramValue));
-            return { success: true, message: `【${paramName}】已设为 "${paramValue}"` };
-        }
-        
-        if (paramName === '心动信送达时间') {
-            // 验证格式：允许 H:mm 或 HH:mm
-            if (!paramValue.match(/^([01]?\d|2[0-3]):[0-5]\d$/)) {
-                return { success: false, message: `【${paramName}】格式错误，请使用 HH:mm (如 15:35)` };
-            }
-            ext.storageSet("lovemail_delivery_time", JSON.stringify(paramValue));
-            
-            // 尝试触发自动化逻辑重启
-            try {
-                if (typeof registerLoveMailSystem === 'function') registerLoveMailSystem();
-            } catch(e) {}
-
-            return { success: true, message: `【${paramName}】已设为 ${paramValue} (重启脚本后生效更稳固)` };
-        }
-    }
-    
-    // 5. 处理群组类参数
-    if (basicGroupParams.includes(paramName)) {
-        const groupMap = {
-            '点歌群': 'song_group_id',
-            '后台群': 'background_group_id',
-            '公告群': 'adminAnnounceGroupId'
-        };
-        if (paramValue !== '未设置' && !paramValue.match(/^\d+$/)) {
-            return { success: false, message: `【${paramName}】参数值必须是数字群号或"未设置"` };
-        }
-        const valueToSet = paramValue === '未设置' ? null : paramValue;
-        ext.storageSet(groupMap[paramName], JSON.stringify(valueToSet));
-        return { success: true, message: `【${paramName}】已设为 ${paramValue}` };
-    }
-    
-    return { success: false, message: `❌ 未知参数名：${paramName}（不在基础设置范围内）` };
-}
-
-// ========================
-// 🔧 高级设置指令
-// ========================
-
-let cmd_advanced_settings = seal.ext.newCmdItemInfo();
-cmd_advanced_settings.name = '高级设置';
-cmd_advanced_settings.help = `查看或设置高级参数
-
-格式1：.高级设置 - 查看当前设置
-格式2：.高级设置 
-【参数名1】参数值1
-【参数名2】参数值2
-...
-
-高级参数模板（复制并修改后发送）：
-.高级设置
-【目击报告】关闭
-【地点系统】关闭
-【匿名信】关闭
-【后台信件】开启
-【送礼公开发送】关闭
-【寄信公开发送】关闭
-【匿名信公开发送】关闭
-【目击报告方式】双向通知
-【目击每日上限】3
-【包含已结束】是
-【时间重叠阈值】30
-【电话最小时长】29
-【私密最小时长】59
-【寄信混乱送错】0
-【寄信混乱涂改】0
-【寄信混乱丢失】0
-【寄信混乱反义】0
-【寄信混乱乱序】0
-【寄信混乱模糊】0
-【寄信混乱混淆】0
-【寄信混乱诗意】0
-【寄信每日上限】5
-【寄信公开概率】50
-【小群过期时间】48
-
-参数说明：
-• 开关类：开启/关闭
-• 数字类：直接填写数字
-• 选项类：见具体选项（如：双向通知/单向通知）`;
-
-cmd_advanced_settings.solve = function(ctx, msg, argv) {
-    if (!isUserAdmin(ctx, msg)) {
-        seal.replyToSender(ctx, msg, "该指令仅限管理员使用");
-        return seal.ext.newCmdExecuteResult(true);
-    }
-
-    const rawMessage = msg.message.trim();
-    
-    // 检查是否包含换行符（表示有参数设置）
-    if (rawMessage.includes('\n')) {
-        return applyAdvancedSettings(ctx, msg, rawMessage);
-    } else {
-        return showAdvancedSettings(ctx, msg);
-    }
-};
-
-// 显示高级设置
-function showAdvancedSettings(ctx, msg) {
-    const results = [];
-    
-    results.push("🔧 当前高级设置（复制以下内容进行修改）");
-    results.push("─────────────────────────────────────────────");
-    results.push(".高级设置");
-    
-    // 1. 目击报告系统开关
-    const sightingConfig = getSightingConfig();
-    results.push(`【目击报告】${sightingConfig.enabled ? '开启' : '关闭'}`);
-    
-    // 2. 地点系统开关
-    const placeConfig = getPlaceSystemConfig();
-    results.push(`【地点系统】${placeConfig.enabled ? '开启' : '关闭'}`);
-    
-    // 3. 高级功能模块开关
-    const featureConfig = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
-    const defaultFeatureConfig = {
-        enable_general_letter: true,
-        enable_secret_letter: true
-    };
-    const mergedFeatureConfig = { ...defaultFeatureConfig, ...featureConfig };
-    
-    // 高级设置显示指定功能
-    const advancedFeatures = {
-        '匿名信': 'enable_secret_letter',
-        '后台信件': 'enable_general_letter'  // 注意：显示名称改为后台信件
-    };
-    
-    for (const [displayName, configKey] of Object.entries(advancedFeatures)) {
-        const value = mergedFeatureConfig[configKey] !== undefined ? mergedFeatureConfig[configKey] : defaultFeatureConfig[configKey];
-        results.push(`【${displayName}】${value ? '开启' : '关闭'}`);
-    }
-    
-    // 4. 公开发送开关
-    const publicSendDisplay = {
-        'gift_public_send': '送礼公开发送',
-        'letter_public_send': '寄信公开发送',
-        'secret_letter_public_send': '匿名信公开发送'
-    };
-    
-    for (const [key, name] of Object.entries(publicSendDisplay)) {
-        const value = JSON.parse(ext.storageGet(key) || "false");
-        results.push(`【${name}】${value ? '开启' : '关闭'}`);
-    }
-    
-    // 5. 目击报告详细参数
-    const sightingDetails = getSightingConfig();
-    results.push(`【目击报告方式】${sightingDetails.send_to_all ? '双向通知' : '单向通知'}`);
-    results.push(`【目击每日上限】${sightingDetails.max_reports_per_day}`);
-    results.push(`【包含已结束】${sightingDetails.include_ended_meetings ? '是' : '否'}`);
-    results.push(`【时间重叠阈值】${Math.round(sightingDetails.time_overlap_threshold * 100)}`);
-    
-    // 6. 电话和私密邀约最小时长
-    const durationConfig = JSON.parse(ext.storageGet("appointment_duration_config") || JSON.stringify({phone: 29, private: 59}));
-    results.push(`【电话最小时长】${durationConfig.phone}`);
-    results.push(`【私密最小时长】${durationConfig.private}`);
-    
-    // 7. 寄信混乱效果参数
-    const chaosConfig = JSON.parse(ext.storageGet("chaos_letter_config") || JSON.stringify({
-        misdelivery: 0,
-        blackoutText: 0,
-        loseContent: 0,
-        antonymReplace: 0,
-        reverseOrder: 0,
-        fuzzySignature: 0,
-        mistakenSignature: 0,
-        poeticSignature: 0,
-        dailyLimit: 5,
-        publicChance: 50
-    }));
-    
-    const chaosDisplay = {
-        'misdelivery': '寄信混乱送错',
-        'blackoutText': '寄信混乱涂改',
-        'loseContent': '寄信混乱丢失',
-        'antonymReplace': '寄信混乱反义',
-        'reverseOrder': '寄信混乱乱序',
-        'fuzzySignature': '寄信混乱模糊',
-        'mistakenSignature': '寄信混乱混淆',
-        'poeticSignature': '寄信混乱诗意'
-    };
-    
-    for (const [key, name] of Object.entries(chaosDisplay)) {
-        results.push(`【${name}】${chaosConfig[key]}`);
-    }
-    
-    results.push(`【寄信每日上限】${chaosConfig.dailyLimit}`);
-    results.push(`【寄信公开概率】${chaosConfig.publicChance}`);
-    
-    // 8. 小群过期时间设置
-    const groupExpireHours = parseInt(ext.storageGet("group_expire_hours") || "48");
-    results.push(`【小群过期时间】${groupExpireHours}`);
-    
-    results.push("");
-    results.push("💡 使用方法：");
-    results.push("1. 复制以上所有行");
-    results.push("2. 修改需要调整的参数值");
-    results.push("3. 发送：.高级设置 后粘贴修改后的内容");
-    
     seal.replyToSender(ctx, msg, results.join('\n'));
-    return seal.ext.newCmdExecuteResult(true);
 }
 
-// 应用高级设置
-function applyAdvancedSettings(ctx, msg, rawMessage) {
-    const lines = rawMessage.split('\n');
-    const successResults = [];
-    const errorResults = [];
-    const warningResults = [];
-    let paramCount = 0;
-    
-    // 跳过第一行（指令本身）
-    for (let i = 1; i < lines.length; i++) {
-        let line = lines[i].trim();
-        if (!line) continue;
-        
-        // 解析每行的参数（格式：【参数名】参数值）
-        const match = line.match(/^【([^】]+)】\s*(.+)$/);
-        if (!match) {
-            warningResults.push(`⚠️ 格式错误：${line}`);
-            continue;
-        }
-        
-        const paramName = match[1].trim();
-        const paramValue = match[2].trim();
-        paramCount++;
-        
-        // 应用单个高级参数设置
-        const result = applyAdvancedParam(paramName, paramValue);
-        if (result.success) {
-            successResults.push(result.message);
-        } else {
-            errorResults.push(result.message);
-        }
+function applyInteractionParam(name, val) {
+    // 1. 地点系统处理 (保持原样)
+    if (name === '地点系统') { 
+        let c = getPlaceSystemConfig(); 
+        c.enabled = (val === '开启'); 
+        setPlaceSystemConfig(c); 
+        return { success: true, message: `地点系统已${val}` }; 
     }
-    
-    // 构建回复
-    let replyText = buildResultMessage("高级设置", paramCount, successResults, errorResults, warningResults);
-    
-    seal.replyToSender(ctx, msg, replyText);
-    return seal.ext.newCmdExecuteResult(true);
-}
 
-// 应用单个高级参数
-function applyAdvancedParam(paramName, paramValue) {
-    // 高级设置参数列表
-    const advancedSwitchParams = [
-        '目击报告', '地点系统', '匿名信', '后台信件',
-        '送礼公开发送', '寄信公开发送', '匿名信公开发送'
-    ];
-    
-    const advancedNumberParams = [
-        '目击每日上限', '时间重叠阈值', '电话最小时长', 
-        '私密最小时长', '寄信每日上限', '寄信公开概率',
-        '小群过期时间'
-    ];
-    
-    const advancedChaosParams = [
-        '寄信混乱送错', '寄信混乱涂改', '寄信混乱丢失',
-        '寄信混乱反义', '寄信混乱乱序', '寄信混乱模糊',
-        '寄信混乱混淆', '寄信混乱诗意'
-    ];
-    
-    const advancedSpecialParams = ['目击报告方式', '包含已结束'];
-    
-    // 处理开关类参数
-    if (advancedSwitchParams.includes(paramName)) {
-        if (paramValue !== '开启' && paramValue !== '关闭') {
-            return {
-                success: false,
-                message: `【${paramName}】参数值必须是"开启"或"关闭"`
-            };
-        }
-        
-        const value = paramValue === '开启';
-        
-        // 特殊处理目击报告和地点系统
-        if (paramName === '目击报告') {
-            const config = getSightingConfig();
-            config.enabled = value;
-            setSightingConfig(config);
-        } else if (paramName === '地点系统') {
-            const config = getPlaceSystemConfig();
-            config.enabled = value;
-            setPlaceSystemConfig(config);
-        } 
-        // 处理公开发送开关
-        else if (paramName === '送礼公开发送') {
-            ext.storageSet("gift_public_send", JSON.stringify(value));
-        } else if (paramName === '寄信公开发送') {
-            ext.storageSet("letter_public_send", JSON.stringify(value));
-        } else if (paramName === '匿名信公开发送') {
-            ext.storageSet("secret_letter_public_send", JSON.stringify(value));
-        }
-        // 处理功能模块开关（注意：后台信件对应enable_general_letter）
-        else {
-            const featureMap = {
-                '匿名信': 'enable_secret_letter',
-                '后台信件': 'enable_general_letter'
-            };
-            
-            const configKey = featureMap[paramName];
-            if (configKey) {
-                let featureConfig = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
-                featureConfig[configKey] = value;
-                ext.storageSet("global_feature_toggle", JSON.stringify(featureConfig));
-            }
-        }
-        
-        return {
-            success: true,
-            message: `【${paramName}】已${value ? '开启' : '关闭'}`
-        };
+    // 2. 目击报告相关 (保持原样)
+    if (['目击报告', '目击报告方式', '目击每日上限', '时间重叠阈值', '包含已结束'].includes(name)) {
+        let c = getSightingConfig();
+        if (name === '目击报告') c.enabled = (val === '开启');
+        if (name === '目击报告方式') c.send_to_all = (val === '双向通知');
+        if (name === '目击每日上限') c.max_reports_per_day = parseInt(val);
+        if (name === '时间重叠阈值') c.time_overlap_threshold = parseInt(val) / 100;
+        if (name === '包含已结束') c.include_ended_meetings = (val === '是');
+        setSightingConfig(c);
+        return { success: true, message: `【${name}】已更新` };
     }
-    
-    // 处理数字类参数
-    if (advancedNumberParams.includes(paramName)) {
-        const numValue = parseInt(paramValue);
-        
-        if (isNaN(numValue)) {
-            return {
-                success: false,
-                message: `【${paramName}】参数值必须是数字`
-            };
-        }
-        
-        // 参数范围检查
-        switch (paramName) {
-            case '目击每日上限':
-                if (numValue < 1 || numValue > 20) {
-                    return {
-                        success: false,
-                        message: `【${paramName}】必须为1-20`
-                    };
-                }
-                const config1 = getSightingConfig();
-                config1.max_reports_per_day = numValue;
-                setSightingConfig(config1);
-                break;
-                
-            case '时间重叠阈值':
-                if (numValue < 1 || numValue > 100) {
-                    return {
-                        success: false,
-                        message: `【${paramName}】必须为1-100`
-                    };
-                }
-                const config2 = getSightingConfig();
-                config2.time_overlap_threshold = numValue / 100;
-                setSightingConfig(config2);
-                break;
-                
-            case '电话最小时长':
-            case '私密最小时长':
-                if (numValue < 1) {
-                    return {
-                        success: false,
-                        message: `【${paramName}】必须≥1`
-                    };
-                }
-                const durationConfig = JSON.parse(ext.storageGet("appointment_duration_config") || "{}");
-                if (paramName === '电话最小时长') {
-                    durationConfig.phone = numValue;
-                } else {
-                    durationConfig.private = numValue;
-                }
-                ext.storageSet("appointment_duration_config", JSON.stringify(durationConfig));
-                break;
-                
-            case '寄信每日上限':
-                if (numValue < 1 || numValue > 100) {
-                    return {
-                        success: false,
-                        message: `【${paramName}】必须为1-100`
-                    };
-                }
-                const chaosConfig1 = JSON.parse(ext.storageGet("chaos_letter_config") || "{}");
-                chaosConfig1.dailyLimit = numValue;
-                ext.storageSet("chaos_letter_config", JSON.stringify(chaosConfig1));
-                break;
-                
-            case '寄信公开概率':
-                if (numValue < 0 || numValue > 100) {
-                    return {
-                        success: false,
-                        message: `【${paramName}】必须为0-100`
-                    };
-                }
-                const chaosConfig2 = JSON.parse(ext.storageGet("chaos_letter_config") || "{}");
-                chaosConfig2.publicChance = numValue;
-                ext.storageSet("chaos_letter_config", JSON.stringify(chaosConfig2));
-                break;
-                
-            case '小群过期时间':
-                if (numValue < 1 || numValue > 720) {
-                    return {
-                        success: false,
-                        message: `【${paramName}】必须为1-720(1-30天)`
-                    };
-                }
-                ext.storageSet("group_expire_hours", numValue.toString());
-                break;
-        }
-        
-        return {
-            success: true,
-            message: `【${paramName}】已设为 ${numValue}`
-        };
+
+    // 3. 邀约时长处理 (保持原样)
+    const durationMap = { '电话最小时长': 'phone', '私密最小时长': 'private' };
+    if (durationMap[name]) {
+        let d = JSON.parse(ext.storageGet("appointment_duration_config") || "{}");
+        d[durationMap[name]] = parseInt(val);
+        ext.storageSet("appointment_duration_config", JSON.stringify(d));
+        return { success: true, message: `【${name}】已更新` };
     }
-    
-    // 处理混乱效果参数
-    if (advancedChaosParams.includes(paramName)) {
-        const numValue = parseInt(paramValue);
-        
-        if (isNaN(numValue) || numValue < 0 || numValue > 100) {
-            return {
-                success: false,
-                message: `【${paramName}】参数值必须是0-100之间的数字`
-            };
-        }
-        
-        const chaosMap = {
-            '寄信混乱送错': 'misdelivery',
-            '寄信混乱涂改': 'blackoutText',
-            '寄信混乱丢失': 'loseContent',
-            '寄信混乱反义': 'antonymReplace',
-            '寄信混乱乱序': 'reverseOrder',
-            '寄信混乱模糊': 'fuzzySignature',
-            '寄信混乱混淆': 'mistakenSignature',
-            '寄信混乱诗意': 'poeticSignature'
-        };
-        
-        const configKey = chaosMap[paramName];
-        if (configKey) {
-            const chaosConfig = JSON.parse(ext.storageGet("chaos_letter_config") || "{}");
-            chaosConfig[configKey] = numValue;
-            ext.storageSet("chaos_letter_config", JSON.stringify(chaosConfig));
-        }
-        
-        return {
-            success: true,
-            message: `【${paramName}】已设为 ${numValue}%`
-        };
-    }
-    
-    // 处理特殊参数
-    if (advancedSpecialParams.includes(paramName)) {
-        switch (paramName) {
-            case '目击报告方式':
-                if (paramValue !== '双向通知' && paramValue !== '单向通知') {
-                    return {
-                        success: false,
-                        message: '【目击报告方式】参数值必须是"双向通知"或"单向通知"'
-                    };
-                }
-                const config1 = getSightingConfig();
-                config1.send_to_all = paramValue === '双向通知';
-                setSightingConfig(config1);
-                break;
-                
-            case '包含已结束':
-                if (paramValue !== '是' && paramValue !== '否') {
-                    return {
-                        success: false,
-                        message: '【包含已结束】参数值必须是"是"或"否"'
-                    };
-                }
-                const config2 = getSightingConfig();
-                config2.include_ended_meetings = paramValue === '是';
-                setSightingConfig(config2);
-                break;
-        }
-        
-        return {
-            success: true,
-            message: `【${paramName}】已设为 ${paramValue}`
-        };
-    }
-    
-    return {
-        success: false,
-        message: `❌ 未知参数名：${paramName}（不在高级设置范围内）`
+
+    // 4. ✨ 修改重点：将原本的 setConfig 改为 storageSet
+    const storageKeys = { 
+        '寄信冷却时间': 'mailCooldown', 
+        '送礼冷却时间': 'giftCooldown', 
+        '匿名信冷却时间': 'secretLetterCooldown', 
+        '送礼模式': 'giftMode' 
     };
+
+    if (storageKeys[name]) {
+        // 直接存入数据库，存为字符串或数字均可，建议保持字符串存入，读取时 parseInt
+        ext.storageSet(storageKeys[name], val); 
+        return { success: true, message: `【${name}】已设为 ${val}` };
+    }
+
+    return { success: false, message: `未知参数：${name}` };
+}
+
+// --- 3️⃣ 信件设置模块 (已修正为纯 Storage) ---
+function showLetterSettings(ctx, msg) {
+    const feature = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
+    const chaos = JSON.parse(ext.storageGet("chaos_letter_config") || "{\"dailyLimit\":5}");
+    const results = [
+        "✉️ 信件设置当前配置", "────────────────", ".设置 信件设置",
+        `【寄信】${feature.enable_chaos_letter !== false ? '开启' : '关闭'}`,
+        `【心动信】${feature.enable_lovemail !== false ? '开启' : '关闭'}`,
+        `【匿名信】${feature.enable_secret_letter !== false ? '开启' : '关闭'}`,
+        `【后台信件】${feature.enable_general_letter !== false ? '开启' : '关闭'}`,
+        `【心动信送达时间】${JSON.parse(ext.storageGet("lovemail_delivery_time") || "\"22:00\"")}`,
+        `【寄信每日上限】${chaos.dailyLimit}`,
+        `【匿名信每日上限】${ext.storageGet("secretLetterDailyLimit") || "30"}`,
+        `【寄信混乱送错】${chaos.misdelivery || 0}`,
+        `【寄信混乱涂改】${chaos.blackoutText || 0}`,
+        `【寄信混乱丢失】${chaos.loseContent || 0}`,
+        `【寄信混乱反义】${chaos.antonymReplace || 0}`,
+        `【寄信混乱乱序】${chaos.reverseOrder || 0}`,
+        `【寄信混乱模糊】${chaos.fuzzySignature || 0}`,
+        `【寄信混乱混淆】${chaos.mistakenSignature || 0}`,
+        `【寄信混乱诗意】${chaos.poeticSignature || 0}`,
+        `【小群过期时间】${ext.storageGet("group_expire_hours") || "48"}`
+    ];
+    seal.replyToSender(ctx, msg, results.join('\n'));
+}
+
+function applyLetterParam(name, val) {
+    const featureMap = { 
+        '寄信': 'enable_chaos_letter', 
+        '心动信': 'enable_lovemail', 
+        '匿名信': 'enable_secret_letter', 
+        '后台信件': 'enable_general_letter' 
+    };
+
+    // 1. 处理功能开关 (保持原样)
+    if (featureMap[name]) {
+        let cfg = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
+        cfg[featureMap[name]] = (val === '开启');
+        ext.storageSet("global_feature_toggle", JSON.stringify(cfg));
+        return { success: true, message: `【${name}】已${val}` };
+    }
+
+    // 2. 处理送达时间 (保持原样)
+    if (name === '心动信送达时间') { 
+        ext.storageSet("lovemail_delivery_time", JSON.stringify(val)); 
+        return { success: true, message: `时间已设为 ${val}` }; 
+    }
+
+    // 3. ✨ 修改重点：匿名信每日上限由 setConfig 改为直接 storageSet
+    if (name === '匿名信每日上限') { 
+        ext.storageSet("secretLetterDailyLimit", val); 
+        return { success: true, message: `【${name}】上限已更新为 ${val}` }; 
+    }
+
+    // 4. 处理寄信混乱度参数 (这些原本就是存入 storage 的 JSON，保持原样即可)
+    const chaosMap = { 
+        '寄信每日上限': 'dailyLimit', 
+        '寄信混乱送错': 'misdelivery', 
+        '寄信混乱涂改': 'blackoutText', 
+        '寄信混乱丢失': 'loseContent', 
+        '寄信混乱反义': 'antonymReplace', 
+        '寄信混乱乱序': 'reverseOrder', 
+        '寄信混乱模糊': 'fuzzySignature', 
+        '寄信混乱混淆': 'mistakenSignature', 
+        '寄信混乱诗意': 'poeticSignature' 
+    };
+    if (chaosMap[name]) {
+        let c = JSON.parse(ext.storageGet("chaos_letter_config") || "{}");
+        c[chaosMap[name]] = parseInt(val);
+        ext.storageSet("chaos_letter_config", JSON.stringify(c));
+        return { success: true, message: `【${name}】已更新为 ${val}` };
+    }
+
+    // 5. 过期时间 (保持原样)
+    if (name === '小群过期时间') { 
+        ext.storageSet("group_expire_hours", val); 
+        return { success: true, message: `已设为 ${val}小时` }; 
+    }
+
+    return { success: false, message: `未知参数：${name}` };
+}
+
+// --- 4️⃣ 公告设置模块 (已修正为纯 Storage) ---
+function showPublicSettings(ctx, msg) {
+    const chaos = JSON.parse(ext.storageGet("chaos_letter_config") || "{}");
+    const results = [
+        "📢 公告设置当前配置", "────────────────", ".设置 公告设置",
+        `【心愿公开提醒】${JSON.parse(ext.storageGet("wish_public_send") || "false") ? '开启' : '关闭'}`,
+        `【送礼公开发送】${JSON.parse(ext.storageGet("gift_public_send") || "false") ? '开启' : '关闭'}`,
+        `【寄信公开发送】${JSON.parse(ext.storageGet("letter_public_send") || "false") ? '开启' : '关闭'}`,
+        `【匿名信公开发送】${JSON.parse(ext.storageGet("secret_letter_public_send") || "false") ? '开启' : '关闭'}`,
+        `【寄信公开概率】${chaos.publicChance || 50}`,
+        `【匿名信公开概率】${ext.storageGet("secretLetterPublicChance") || "50"}`,
+        `【匿名信暴露概率】${ext.storageGet("secretLetterRevealChance") || "15"}`,
+        `【每日礼物上限】${ext.storageGet("giftDailyLimit") || "100"}`
+    ];
+    seal.replyToSender(ctx, msg, results.join('\n'));
+}
+
+function applyPublicParam(name, val) {
+    // 1. 处理广播开关 (保持原样)
+    const map = { 
+        '心愿公开提醒': 'wish_public_send', 
+        '送礼公开发送': 'gift_public_send', 
+        '寄信公开发送': 'letter_public_send', 
+        '匿名信公开发送': 'secret_letter_public_send' 
+    };
+    if (map[name]) { 
+        ext.storageSet(map[name], JSON.stringify(val === '开启')); 
+        return { success: true, message: `【${name}】已${val}` }; 
+    }
+
+    // 2. 处理寄信公开概率 (保持原样，存入大表)
+    if (name === '寄信公开概率') {
+        let c = JSON.parse(ext.storageGet("chaos_letter_config") || "{}");
+        c.publicChance = parseInt(val);
+        ext.storageSet("chaos_letter_config", JSON.stringify(c));
+        return { success: true, message: `【${name}】已设为 ${val}%` };
+    }
+
+    // 3. ✨ 修改重点：将原本的 setConfig 改为直接 storageSet
+    const storageKeys = { 
+        '匿名信公开概率': 'secretLetterPublicChance', 
+        '匿名信暴露概率': 'secretLetterRevealChance', 
+        '每日礼物上限': 'giftDailyLimit' 
+    };
+
+    if (storageKeys[name]) {
+        // 直接存入数据库
+        ext.storageSet(storageKeys[name], val); 
+        return { success: true, message: `【${name}】已保存为 ${val}` };
+    }
+
+    return { success: false, message: `未知参数：${name}` };
 }
 
 // ========================
@@ -12254,13 +11781,20 @@ cmd_delete_timeline_precise.solve = (ctx, msg, cmdArgs) => {
 
 ext.cmdMap["删除时间线"] = cmd_delete_timeline_precise;
 /**
- * 🆔 最终整合版：基于角色数据库的群名片同步
+ * 🆔 升级版：同步角色名片至 私信群 + 广播群（水群/公告/点歌）
  */
 function syncAllFromStorage(ctx, msg) {
-    // 💡 获取你自定义格式的存储数据 (注意：你的 getRoleStorage 函数必须保留)
     const storage = getRoleStorage();
     const platform = msg.platform || "QQ";
     const platformData = storage[platform] || {};
+
+    // --- 🔍 新增：获取特殊群号 ---
+    // 对应你之前在【设置 基础】中存入的键名
+    const specialGroups = [
+        JSON.parse(ext.storageGet("adminAnnounceGroupId") || "null"), // 公告群
+        JSON.parse(ext.storageGet("water_group_id") || "null"),       // 水群
+        JSON.parse(ext.storageGet("song_group_id") || "null")        // 点歌群
+    ].filter(id => id && id !== "未设置"); // 过滤掉空值
 
     const charNames = Object.keys(platformData);
     if (charNames.length === 0) {
@@ -12270,33 +11804,49 @@ function syncAllFromStorage(ctx, msg) {
 
     let count = 0;
     charNames.forEach(name => {
-        // 根据你的 storage[platform][name] = [uid, gid] 结构提取
         const uid = platformData[name][0];
-        const targetGid = platformData[name][1];
+        const privateGid = platformData[name][1]; // 原有的私信群
+        
+        // 收集该角色需要同步的所有群 ID
+        let targetGroupList = [];
+        
+        // 1. 添加私信群 (如果有效)
+        if (privateGid && privateGid !== "0") targetGroupList.push(privateGid);
+        
+        // 2. 添加所有特殊群
+        targetGroupList = targetGroupList.concat(specialGroups);
 
-        // 只有当 uid 和 gid 都有效时才下发改名指令
-        if (uid && targetGid && targetGid !== "0") {
-            const setCardPayload = {
-                "action": "set_group_card",
-                "params": {
-                    "group_id": parseInt(targetGid.toString().replace(/[^\d]/g, ""), 10),
-                    "user_id": parseInt(uid.toString().replace(/[^\d]/g, ""), 10),
-                    "card": name
+        // 去重，防止一个群发两次指令
+        targetGroupList = [...new Set(targetGroupList)];
+
+        if (uid) {
+            targetGroupList.forEach(gid => {
+                const cleanGid = parseInt(gid.toString().replace(/[^\d]/g, ""), 10);
+                const cleanUid = parseInt(uid.toString().replace(/[^\d]/g, ""), 10);
+
+                if (!isNaN(cleanGid) && !isNaN(cleanUid)) {
+                    const setCardPayload = {
+                        "action": "set_group_card",
+                        "params": {
+                            "group_id": cleanGid,
+                            "user_id": cleanUid,
+                            "card": name
+                        }
+                    };
+
+                    try {
+                        // 发送修改名片请求
+                        ws(setCardPayload, ctx, { platform: platform, groupId: "" }, "");
+                        count++;
+                    } catch (e) {
+                        console.log(`[名片同步] WS下发失败 (群:${gid}): ${e.message}`);
+                    }
                 }
-            };
-
-            // 发送修改名片请求
-            try {
-                ws(setCardPayload, ctx, { platform: platform, groupId: "" }, "");
-                count++;
-                console.log(`[名片同步] 成功：角色「${name}」 -> 群: ${targetGid}`);
-            } catch (e) {
-                console.log(`[名片同步] WS下发失败: ${e.message}`);
-            }
+            });
         }
     });
 
-    seal.replyToSender(ctx, msg, `🔄 名片同步指令已发出，已尝试更新 ${count} 个角色的群名片。`);
+    seal.replyToSender(ctx, msg, `🔄 名片全同步完成！\n已向 ${specialGroups.length} 个公共群及各私信群下发指令。\n累计尝试更新名片次数：${count}`);
 }
 
 // ========================
