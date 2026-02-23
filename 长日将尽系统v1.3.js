@@ -215,6 +215,9 @@ function handleForwardAction(ctx, msg, data, currentWs) {
 /**
  * 内部辅助：处理群成员数据解析
  */
+/**
+ * 内部辅助：处理群成员数据解析 (适配审查版)
+ */
 function handleMemberListResponse(ctx, msg, data) {
     let members = [];
     if (Array.isArray(data)) {
@@ -223,14 +226,22 @@ function handleMemberListResponse(ctx, msg, data) {
         members = data.members || data.list || Object.values(data);
     }
 
+    // --- 核心修改：检查是否处于“审查模式” ---
+    const auditOwner = ext.storageGet("temp_audit_owner");
+    if (auditOwner) {
+        performAuditLogic(ctx, msg, auditOwner, members);
+        ext.storageSet("temp_audit_owner", ""); // 清除标志位
+        return;
+    }
+
+    // 原有的普通展示逻辑保持不变
     if (members.length > 0) {
         let responseText = `👥 群成员列表（共${members.length}人）:\n\n`;
-        members.slice(0, 30).forEach((member, index) => { // 限制前30个防止文本过长
+        members.slice(0, 30).forEach((member, index) => {
             const user_id = member.user_id || member.qq || '未知';
             const nickname = member.nickname || member.name || '未知';
             const card = member.card || member.group_card || '';
             const role = member.role === 'owner' ? '👑' : (member.role === 'admin' ? '⭐' : '👤');
-            
             let cardDisplay = (card && card !== nickname) ? ` [${card}]` : '';
             responseText += `${index + 1}. ${role} ${nickname}${cardDisplay} (${user_id})\n`;
         });
@@ -238,6 +249,43 @@ function handleMemberListResponse(ctx, msg, data) {
         seal.replyToSender(ctx, msg, responseText);
     } else {
         seal.replyToSender(ctx, msg, "未能解析到有效的群成员数据。");
+    }
+}
+
+/**
+ * 核心对比逻辑：执行结果分析
+ */
+function performAuditLogic(ctx, msg, ownerName, members) {
+    const platform = msg.platform;
+    const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
+    const npcList = JSON.parse(ext.storageGet("a_npc_list") || "[]");
+    
+    const playerMap = {}; 
+    const npcUIDs = {};   
+    const memberUIDs = members.map(m => (m.user_id || m.qq).toString());
+
+    // 建立映射
+    Object.entries(a_private_group[platform] || {}).forEach(([name, data]) => {
+        if (npcList.includes(name)) npcUIDs[name] = data[0]; 
+        else playerMap[data[0]] = name; 
+    });
+
+    const ownerData = a_private_group[platform][ownerName];
+    if (!ownerData) return;
+    const ownerUID = ownerData[0];
+    const gid = ownerData[1];
+
+    // 1. 检查缺 NPC
+    let missing = npcList.filter(n => !memberUIDs.includes(npcUIDs[n]));
+    // 2. 检查多玩家
+    let overlaps = memberUIDs.filter(id => playerMap[id] && id !== ownerUID).map(id => playerMap[id]);
+
+    // 只有异常才回复
+    if (missing.length > 0 || overlaps.length > 0) {
+        let res = `📌 群「${ownerName}」(${gid})：\n`;
+        if (missing.length > 0) res += `❌ 缺NPC：${missing.join('/')}\n`;
+        if (overlaps.length > 0) res += `⚠️ 重合：${overlaps.join('/')}`;
+        seal.replyToSender(ctx, msg, res.trim());
     }
 }
 
@@ -295,11 +343,6 @@ function isUserAdmin(ctx, msg) {
   }
   
 
-  function parseDayNum(dayStr) {
-    const match = dayStr.match(/^D(\d+)/i);
-    return match ? parseInt(match[1]) : 0;
-  }
-
   function normalizeTimeString(s) {
     return s.replace(/\s+/g, "").replace("–", "-").replace("－", "-");
   }
@@ -314,30 +357,9 @@ function isUserAdmin(ctx, msg) {
     return [toMin(s), toMin(e)];
   }
 
-  function totalMinutes(dayNum, min) {
-    return dayNum * 1440 + min;
-  }
 
-  function isInValidContractPeriodNow(timeStr) {
-  const [startMin, endMin] = parseStartEnd(timeStr);
-  const now = new Date();
-  const currentMin = now.getHours() * 60 + now.getMinutes();
-
-  // 阶段定义
-  const isNowInDay = currentMin >= 1 && currentMin <= 1079;
-  const isNowInNight = currentMin >= 1231 && currentMin <= 1439;
-
-  const isTargetInDay = startMin >= 1 && endMin <= 1079;
-  const isTargetInNight = startMin >= 1231 && endMin <= 1439;
-
-  // 仅允许在合法阶段发起合法目标
-  if (isNowInDay && isTargetInDay) return true;
-  if (isNowInNight && isTargetInNight) return true;
-
-  // 其他情况全部禁止
-  return false;
-}
-
+// 注册公告触发频率（例如：每5次发一次）
+seal.ext.registerIntConfig(ext, "announceFrequency", 5, "公告触发频率", "每发生多少次该类型的互动后，向管理员群发送一次记录公告");
 function recordMeetingAndAnnounce(subtype, platform, ctx, endPoint) {
     const subtypeKeyMap = {
         "电话": "call",
@@ -357,8 +379,6 @@ function recordMeetingAndAnnounce(subtype, platform, ctx, endPoint) {
     ext.storageSet(storageKey, count.toString());
 
     const groupId = JSON.parse(ext.storageGet("adminAnnounceGroupId") || "null");
-    console.log("[debug] adminAnnounceGroupId =", ext.storageGet("adminAnnounceGroupId"));
-    console.log("[debug] groupId =", groupId);
 
     if (groupId) {
         const msgDivineLog = seal.newMessage();
@@ -368,51 +388,27 @@ function recordMeetingAndAnnounce(subtype, platform, ctx, endPoint) {
         const ctxDivineLog = seal.createTempCtx(endPoint, msgDivineLog);
 
         const getStageText = (subtype, count) => {
-            // 检查是否应该触发公告
-            let shouldAnnounce = false;
+            // --- 核心修改部分：从配置项获取频率 ---
+            // 获取用户在插件设置里填写的数字，默认为 5
+            const frequency = seal.ext.getIntConfig(ext, "announceFrequency"); 
             
-            if (subtype === "剧情信件" || subtype === "寄信") {
-                // 寄信相关：每5次触发一次
-                shouldAnnounce = (count % 5 === 0);
-            } else {
-                // 其他类型：每5次触发一次（保持原有逻辑）
-                shouldAnnounce = (count % 5 === 0);
-            }
+            // 检查是否应该触发公告：使用动态频率
+            let shouldAnnounce = (count % frequency === 0);
             
             if (!shouldAnnounce) return null;
 
-            // 直接明确的记录文本
             const getDirectRecord = (type, count, emoji) => {
                 return `${emoji} 【第${count}次${type}记录】`;
             };
 
-            if (subtype === "电话") {
-                return getDirectRecord("电话", count, "☎️");
-            }
-
-            if (subtype === "私密") {
-                return getDirectRecord("私密约会", count, "💫");
-            }
-
-            if (subtype === "剧情信件" || subtype === "寄信") {
-                return getDirectRecord("寄信", count, "✉️");
-            }
-
-            if (subtype === "礼物") {
-                return getDirectRecord("礼物赠送", count, "🎁");
-            }
-
-            if (subtype === "匿名信") {
-                return getDirectRecord("匿名信", count, "💌");
-            }
-
-            if (subtype === "心愿") {
-                return getDirectRecord("心愿", count, "🌠");
-            }
-
-            if (subtype === "官约") {
-                return getDirectRecord("官方约会", count, "🏢");
-            }
+            // ... 以下逻辑保持不变 ...
+            if (subtype === "电话") return getDirectRecord("电话", count, "☎️");
+            if (subtype === "私密") return getDirectRecord("私密约会", count, "💫");
+            if (subtype === "剧情信件" || subtype === "寄信") return getDirectRecord("寄信", count, "✉️");
+            if (subtype === "礼物") return getDirectRecord("礼物赠送", count, "🎁");
+            if (subtype === "匿名信") return getDirectRecord("匿名信", count, "💌");
+            if (subtype === "心愿") return getDirectRecord("心愿", count, "🌠");
+            if (subtype === "官约") return getDirectRecord("官方约会", count, "🏢");
 
             return getDirectRecord("互动", count, "📝");
         };
@@ -487,47 +483,6 @@ function checkAcceptanceConflicts(platform, userId, roleName, day, time, exclude
   
     return (parsedPass || "detroit").trim(); // 兜底并清理空格
   }
-
-  function appendAdminLog(actionType, operator, detail = "") {
-    const logKey = "adminActionLog";
-    const raw = ext.storageGet(logKey);
-    let logList = [];
-  
-    try {
-      logList = raw ? JSON.parse(raw) : [];
-    } catch (e) {
-      logList = [];
-    }
-  
-    const now = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
-  
-    logList.push({
-      time: now,
-      operator,
-      action: actionType,
-      detail
-    });
-  
-    ext.storageSet(logKey, JSON.stringify(logList));
-  }
-  
- function isInCooldown(key, cooldownSeconds) {
-  const lastTime = parseInt(ext.storageGet(key) || "0");
-  const now = Date.now();
-  return now - lastTime < cooldownSeconds * 1000;
-}
-
-function setCooldown(key) {
-  ext.storageSet(key, Date.now().toString());
-}
-
-function getRemainingCooldown(key, cooldownSeconds) {
-    const lastTime = parseInt(ext.storageGet(key) || "0");
-    const now = Date.now();
-    const elapsed = now - lastTime;
-    const remaining = (cooldownSeconds * 1000) - elapsed;
-    return remaining > 0 ? Math.ceil(remaining / 1000) : 0;
-}
 
 function isUserFeatureEnabled(roleName, key, defaultValue = true) {
   const blockMap = JSON.parse(ext.storageGet("feature_user_blocklist") || "{}");
@@ -695,17 +650,15 @@ cmd_set_days.solve = (ctx, msg, cmdArgs) => {
       "a_meetingCount_private", 
       "a_meetingCount_letter",
       "a_meetingCount_gift",
-      "a_meetingCount_wish"
+      "a_meetingCount_wish",
+      "a_meetingCount_chaosletter",
+      "a_meetingCount_secretletter",
+      "a_meetingCount_official"
     ];
     
     for (let key of meetingCountKeys) {
       ext.storageSet(key, "0");
     }
-    
-    // 清空每日信件计数
-    ext.storageSet("a_dailyLetterCount", JSON.stringify({}));
-    ext.storageSet("a_dailySecretLetterCount", JSON.stringify({}));
-    ext.storageSet("a_dailyGiftCount", JSON.stringify({}));
     
 
     const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
@@ -725,9 +678,6 @@ cmd_set_days.solve = (ctx, msg, cmdArgs) => {
     ext.storageSet("lovemail_pool", JSON.stringify([]));
     
     responseText += `\n✅ 已同时清空所有会面计数、每日信件计数、寄信限制、心愿池和心动信池`;
-    
-    // 更新统计报告为清空后的状态
-    statisticsReport = generateStatisticsReport(ctx, msg, dayStr, previousDay, true);
   }
   
   // 发送到公告群（如果设置）
@@ -784,6 +734,7 @@ function generateStatisticsReport(ctx, msg, newDay, previousDay, isCleared = fal
   // 获取玩家数量
   const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
   const playerCount = a_private_group[platform] ? Object.keys(a_private_group[platform]).length : 0;
+  const loveshow_name = JSON.parse(ext.storageGet("love_show_name"))
   
   // 获取待处理请求
   const appointmentList = JSON.parse(ext.storageGet("appointmentList") || "[]");
@@ -816,10 +767,9 @@ function generateStatisticsReport(ctx, msg, newDay, previousDay, isCleared = fal
   
   // 生成报告
   let report = 
-    `📊 【系统统计报告】\n\n` +
+    `📊 【${loveshow_name}统计报告】\n\n` +
     `🔄 天数切换：${previousDay} → ${newDay}\n` +
     `🕒 生成时间：${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}\n` +
-    `🔄 重置状态：${isCleared ? "✅ 已清空" : "⏸️ 未清空"}\n\n` +
     
     `👥 【玩家统计】\n` +
     `• 绑定角色数：${playerCount} 人\n\n` +
@@ -1403,7 +1353,7 @@ cmd_phone.solve = (ctx, msg, cmdArgs) => {
   for (let toname of names) {
     // 检查对方是否已绑定
     if (!a_private_group[platform] || !a_private_group[platform][toname]) {
-      failed.push(`${toname}（未绑定）`);
+      failed.push(`${toname}（未注册）`);
       continue;
     }
 
@@ -1932,7 +1882,7 @@ cmd_appointment_private.solve = (ctx, msg, cmdArgs) => {
   for (let toname of names) {
     // 检查对方是否已绑定
     if (!a_private_group[platform] || !a_private_group[platform][toname]) {
-      failed.push(`${toname}（未绑定）`);
+      failed.push(`${toname}（未注册）`);
       continue;
     }
 
@@ -2209,89 +2159,76 @@ cmd_send_letter_updated.solve = (ctx, msg, cmdArgs) => {
 ext.cmdMap["剧情信件"] = cmd_send_letter_updated;
 
 // ========================
-// 🛒 礼物商城指令（修改版：1小时冷却，只显示1个礼物）
+// 🛒 礼物商城指令（方案 C 重构版）
 // ========================
 
 let cmd_view_preset_gifts = seal.ext.newCmdItemInfo();
 cmd_view_preset_gifts.name = "礼物商城";
-cmd_view_preset_gifts.help = "礼物商城 - 查看预设礼物列表（1小时冷却）";
+cmd_view_preset_gifts.help = "礼物商城 - 随机解锁 1 个预设礼物（受游戏天数和冷却控制）";
 
 cmd_view_preset_gifts.solve = (ctx, msg) => {
     const platform = msg.platform;
-    const uid = msg.sender.userId; // 格式：platform:用户ID
-    let uuid = msg.sender.userId.replace(`${platform}:`, "");
+    const uid = msg.sender.userId.replace(`${platform}:`, "");
+    const userKey = `${platform}:${uid}`; // 统一使用大表 Key 格式
 
-      // 获取发送者角色名
-      const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
-      if (!a_private_group[platform]) a_private_group[platform] = {};
-      
-      const sendname = Object.entries(a_private_group[platform])
-        .find(([_, val]) => val[0] === uuid)?.[0];
-      if (!sendname) {
-        seal.replyToSender(ctx, msg, "请先使用「创建新角色」绑定角色");
-        return seal.ext.newCmdExecuteResult(true);
-      }
-    
-    // 检查冷却时间（1小时 = 3600秒）
-    const cooldownKey = `cooldown_gift_shop_${platform}_${uid.split(':')[1]}`;
-    const cooldownSeconds = 5400; // 1小时3600
-    
-    if (isInCooldown(cooldownKey, cooldownSeconds)) {
-        const remainingTime = getRemainingCooldown(cooldownKey, cooldownSeconds);
-        const minutes = Math.ceil(remainingTime / 60);
-        seal.replyToSender(ctx, msg, `⏳ 礼物商城浏览中，请 ${minutes} 分钟后再来~`);
+    // 1. 身份验证
+    const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
+    const sendname = Object.keys(a_private_group[platform] || {}).find(
+        key => a_private_group[platform][key][0] === uid
+    );
+    if (!sendname) {
+        seal.replyToSender(ctx, msg, "⚠️ 请先创建角色再逛商城。");
         return seal.ext.newCmdExecuteResult(true);
     }
 
+    // 2. 【方案 C】冷却检查 (使用全局冷却大表)
+    let globalCooldowns = JSON.parse(ext.storageGet("global_shop_cooldowns") || "{}");
+    const now = Date.now();
+    const cooldownDuration = 5400 * 1000; // 1.5 小时转换为毫秒
+
+    if (now - (globalCooldowns[userKey] || 0) < cooldownDuration) {
+        const remainingMin = Math.ceil((cooldownDuration - (now - globalCooldowns[userKey])) / 60000);
+        seal.replyToSender(ctx, msg, `⏳ 进货中... 商城正在整顿，请 ${remainingMin} 分钟后再来~`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    // 3. 获取数据
     const presetGifts = JSON.parse(ext.storageGet("preset_gifts") || "{}");
-    
-    if (Object.keys(presetGifts).length === 0) {
-        seal.replyToSender(ctx, msg, "🛒 礼物商城当前为空，还没有预设礼物哦~");
-        return seal.ext.newCmdExecuteResult(true);
-    }
-    
-    // 获取所有礼物ID
     const giftIds = Object.keys(presetGifts);
     
-    // 随机选择1个礼物
-    const randomIndex = Math.floor(Math.random() * giftIds.length);
-    const selectedGiftId = giftIds[randomIndex];
-    
-    // 获取图鉴数据
+    if (giftIds.length === 0) {
+        return seal.replyToSender(ctx, msg, "🛒 商城空空如也（请管理使用“.投放”添加预设礼物）。");
+    }
+
+    // 4. 【方案 C】图鉴与解锁逻辑
     let giftSightings = JSON.parse(ext.storageGet("gift_sightings") || "{}");
-    if (!giftSightings[uid]) {
-        giftSightings[uid] = {
-            last_view: Date.now(),
-            unlocked_gifts: []
-        };
+    if (!giftSightings[userKey]) {
+        giftSightings[userKey] = { unlocked_gifts: [] };
     }
-    
-    // 更新已解锁的礼物（去重添加）
-    const currentUnlocked = giftSightings[uid].unlocked_gifts || [];
-    let isNew = false;
-    
-    if (!currentUnlocked.includes(selectedGiftId)) {
-        currentUnlocked.push(selectedGiftId);
-        isNew = true;
+
+    // 随机选择 1 个并解锁
+    const randomIndex = Math.floor(Math.random() * giftIds.length);
+    const selectedId = giftIds[randomIndex];
+    const gift = presetGifts[selectedId];
+
+    if (!giftSightings[userKey].unlocked_gifts.includes(selectedId)) {
+        giftSightings[userKey].unlocked_gifts.push(selectedId);
     }
-    
-    giftSightings[uid].unlocked_gifts = currentUnlocked;
-    giftSightings[uid].last_view = Date.now();
+
+    // 5. 持久化大表数据
+    globalCooldowns[userKey] = now;
+    ext.storageSet("global_shop_cooldowns", JSON.stringify(globalCooldowns));
     ext.storageSet("gift_sightings", JSON.stringify(giftSightings));
-    
-    const gift = presetGifts[selectedGiftId];
-    
-    let rep = `📚 已解锁礼物：${currentUnlocked.length}/${giftIds.length}\n\n`;
-    rep += `🎁 ${selectedGiftId}: ${gift.name}\n`;
-    rep += `   ✨ 内容: ${gift.content}\n`;
-    rep += "\n💡 使用方式：\n";
-    rep += "。送礼 对方角色名 #编号 - 发送已解锁的预设礼物\n";
-    rep += "。我的图鉴 - 查看所有已解锁的礼物\n";
-    
-    // 设置冷却时间
-    setCooldown(cooldownKey);
-    
-    seal.replyToSender(ctx, msg, rep.trim());
+
+    // 6. 渲染回复
+    let rep = `🛒 【${sendname}】你在商城货架深处发现了一件宝贝：\n\n`;
+    rep += `📦 编号：${selectedId}\n`;
+    rep += `✨ 礼物：${gift.name}\n`;
+    rep += `📝 内容：${gift.content}\n`;
+    rep += `\n📚 目前已收集：${giftSightings[userKey].unlocked_gifts.length} / ${giftIds.length}\n`;
+    rep += `💡 发送「。我的图鉴」查看所有已解锁礼物。`;
+
+    seal.replyToSender(ctx, msg, rep);
     return seal.ext.newCmdExecuteResult(true);
 };
 
@@ -2368,238 +2305,135 @@ ext.cmdMap["我的图鉴"] = cmd_view_my_gift_collection;
 let cmd_send_gift = seal.ext.newCmdItemInfo();
 cmd_send_gift.name = "送礼";
 cmd_send_gift.help = "。送礼 对方角色名 礼物内容/#预设编号\n示例：\n。送礼 张三 #1\n。送礼 李四 一束玫瑰花\n使用「礼物商城」查看预设礼物";
-cmd_send_gift.solve = (ctx, msg, cmdArgs) => {
-  let config = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
-  let enable_general_gift = config.enable_general_gift ?? true;
 
-  if (!enable_general_gift) {
-    seal.replyToSender(ctx, msg, "🎁 礼物功能已被禁用，无法使用本指令。");
+cmd_send_gift.solve = (ctx, msg, cmdArgs) => {
+  // 1. 功能开关检查 (保持不变)
+  const config = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
+  if (!(config.enable_general_gift ?? true)) {
+    seal.replyToSender(ctx, msg, "🎁 礼物功能已被禁用。");
     return seal.ext.newCmdExecuteResult(true);
   }
 
-  let toname = cmdArgs.getArgN(1);
-  let giftInput = cmdArgs.getArgN(2);
+  const toname = cmdArgs.getArgN(1);
+  const giftInput = cmdArgs.getArgN(2);
   if (!toname || !giftInput) {
-    const ret = seal.ext.newCmdExecuteResult(true);
-    ret.showHelp = true;
-    return ret;
+    seal.replyToSender(ctx, msg, cmd_send_gift.help);
+    return seal.ext.newCmdExecuteResult(true);
   }
 
-  let a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
-  let platform = msg.platform;
-  let uid = msg.sender.userId.replace(`${platform}:`, "");
-  if (!a_private_group[platform]) a_private_group[platform] = {};
-
-  let sendname = Object.keys(a_private_group[platform]).find(
+  const platform = msg.platform;
+  const uid = msg.sender.userId.replace(`${platform}:`, "");
+  const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
+  
+  // 2. 身份识别
+  const sendname = Object.keys(a_private_group[platform] || {}).find(
     key => a_private_group[platform][key][0] === uid
   );
   if (!sendname) {
-    seal.replyToSender(ctx, msg, `请先创建新角色再使用该指令`);
+    seal.replyToSender(ctx, msg, `❌ 请先创建新角色再使用该指令`);
     return seal.ext.newCmdExecuteResult(true);
   }
 
-  // ⛔ 检查是否被单独封禁
-  let blockMap = JSON.parse(ext.storageGet("feature_user_blocklist") || "{}");
-  let userBlock = blockMap[sendname];
-  if (userBlock && userBlock.enable_general_gift === false) {
-    seal.replyToSender(ctx, msg, `🎁 ${sendname} 被限制使用礼物功能，无法执行『送礼』。`);
-    return seal.ext.newCmdExecuteResult(true);
+  // 3. 权限与自送检查 (保持不变)
+  const blockMap = JSON.parse(ext.storageGet("feature_user_blocklist") || "{}");
+  if (blockMap[sendname]?.enable_general_gift === false) {
+    return seal.replyToSender(ctx, msg, `🎁 ${sendname} 被限制使用礼物功能。`);
   }
-
   if (toname === sendname) {
-    seal.replyToSender(ctx, msg, `🌸 礼不自赠，情当他寄。`);
-    return seal.ext.newCmdExecuteResult(true);
+    return seal.replyToSender(ctx, msg, `🌸 礼不自赠，情当他寄。`);
   }
-
   if (!a_private_group[platform][toname]) {
-    seal.replyToSender(ctx, msg, `未找到该角色名，请确认对方是否已绑定`);
+    return seal.replyToSender(ctx, msg, `❌ 未找到收件人 ${toname}`);
+  }
+
+  // 4. 冷却与限次检查 (保持不变)
+  const gameDay = ext.storageGet("global_days") || "D0";
+  const dailyLimit = seal.ext.getIntConfig(ext, "giftDailyLimit") || 100;
+  const cooldownMin = seal.ext.getIntConfig(ext, "giftCooldown") || 2;
+  
+  let globalStats = JSON.parse(ext.storageGet("global_gift_stats") || "{}");
+  let globalCooldowns = JSON.parse(ext.storageGet("global_gift_cooldowns") || "{}");
+  const userKey = `${platform}:${uid}`;
+  const now = Date.now();
+
+  const lastSent = globalCooldowns[userKey] || 0;
+  if (now - lastSent < cooldownMin * 60 * 1000) {
+    const rem = Math.ceil((cooldownMin * 60 * 1000 - (now - lastSent)) / 1000);
+    seal.replyToSender(ctx, msg, `⏳ 快递员仍在路上，请等待 ${rem} 秒后再送~`);
     return seal.ext.newCmdExecuteResult(true);
   }
 
-  // 获取送礼模式配置
-  let giftMode = seal.ext.getIntConfig(ext, "giftMode");
-  // 如果扩展配置读取失败，尝试从storage读取
-  if (giftMode === undefined || giftMode === null) {
-    giftMode = parseInt(ext.storageGet("gift_mode_config") || "0");
+  let userStat = globalStats[userKey] || { day: gameDay, count: 0 };
+  if (userStat.day !== gameDay) userStat = { day: gameDay, count: 0 };
+  if (userStat.count >= dailyLimit) {
+    seal.replyToSender(ctx, msg, `🎁 今日送礼次数已达上限(${dailyLimit})。`);
+    return seal.ext.newCmdExecuteResult(true);
   }
-  
-  // 判断是预设礼物还是自定义礼物
-  let isPresetGift = false;
-  let giftContent = giftInput;
-  let presetGiftId = null;
-  
+
+  // 5. ✨ 核心修改：礼物内容处理 (获取预设名字)
+  let giftDisplayName = ""; // 展示的名字
+  let giftContent = giftInput; // 实际内容
+
   if (giftInput.startsWith('#')) {
-    // 尝试获取预设礼物
     const presetGifts = JSON.parse(ext.storageGet("preset_gifts") || "{}");
-    if (presetGifts[giftInput]) {
-      // 🔍 检查图鉴：玩家是否已解锁此礼物
-      const giftSightings = JSON.parse(ext.storageGet("gift_sightings") || "{}");
-      const userSightings = giftSightings[msg.sender.userId];
-      
-      // 获取已解锁的礼物列表
-      const unlockedGifts = userSightings ? userSightings.unlocked_gifts || [] : [];
-      
-      if (!unlockedGifts.includes(giftInput)) {
-        // 礼物未解锁
-        seal.replyToSender(ctx, msg, 
-          `🔒 礼物 ${giftInput} 未解锁，无法赠送！\n\n` +
-          `💡 请先使用「。礼物商城」查看并解锁此礼物\n` +
-          `📚 使用「。我的图鉴」查看已解锁的礼物\n\n` +
-          `🎯 当前已解锁：${unlockedGifts.length} 个礼物\n` +
-          `🛒 查看商城冷却：30分钟`
-        );
-        return seal.ext.newCmdExecuteResult(true);
-      }
-      
-      isPresetGift = true;
-      presetGiftId = giftInput;
-      giftContent = presetGifts[giftInput].content;
-      
-      // 更新使用次数
-      presetGifts[giftInput].usage_count = (presetGifts[giftInput].usage_count || 0) + 1;
-      ext.storageSet("preset_gifts", JSON.stringify(presetGifts));
-    } else {
-      // 预设礼物不存在
-      seal.replyToSender(ctx, msg, `❌ 预设礼物 ${giftInput} 不存在，请使用「礼物商城」查看可用礼物`);
+    const giftData = presetGifts[giftInput];
+    
+    if (!giftData) {
+      seal.replyToSender(ctx, msg, `❌ 预设礼物 ${giftInput} 不存在`);
       return seal.ext.newCmdExecuteResult(true);
     }
-  }
+    
+    // 检查解锁图鉴
+    const sightings = JSON.parse(ext.storageGet("gift_sightings") || "{}");
+    const userUnlocked = sightings[msg.sender.userId]?.unlocked_gifts || [];
+    if (!userUnlocked.includes(giftInput)) {
+       seal.replyToSender(ctx, msg, `🔒 礼物 ${giftInput} 未解锁！请先去商城解锁。`);
+       return seal.ext.newCmdExecuteResult(true);
+    }
 
-  // 根据送礼模式进行检查
-  if (giftMode === 1) { // 只允许预设礼物
-    if (!isPresetGift) {
-      seal.replyToSender(ctx, msg, 
-        `⚠️ 当前送礼模式为「只允许预设礼物」\n\n` +
-        `📋 请使用预设礼物编号，格式：\n` +
-        `。送礼 ${toname} #编号\n\n` +
-        `💡 使用「。礼物商城」查看所有预设礼物\n` +
-        `📚 使用「。我的图鉴」查看已解锁的礼物`
-      );
-      return seal.ext.newCmdExecuteResult(true);
-    }
-  } else if (giftMode === 2) { // 只允许自定义礼物
-    if (isPresetGift) {
-      seal.replyToSender(ctx, msg, 
-        `⚠️ 当前送礼模式为「只允许自定义礼物」\n\n` +
-        `📋 请输入自定义礼物内容，格式：\n` +
-        `。送礼 ${toname} 礼物内容\n\n` +
-        `💡 示例：。送礼 ${toname} 一束玫瑰花`
-      );
-      return seal.ext.newCmdExecuteResult(true);
-    }
-  } else if (giftMode === 0) { // 两种都允许
-    // 不做限制
+    giftDisplayName = `「${giftData.name}」`; // 这里获取预设的名字
+    giftContent = giftData.content;
   } else {
-    // 未知模式，默认为两种都允许
-    console.warn(`未知的送礼模式: ${giftMode}，默认使用模式0`);
+    giftDisplayName = "一份特别的礼物"; // 自定义送礼时的通用称呼
+    giftContent = giftInput;
   }
 
-  // ⛔ 图片限制（对自定义礼物和预设礼物都检查）
-  if (/CQ:image|\[CQ:image/.test(giftContent)) {
-    seal.replyToSender(ctx, msg, `⚠️ 礼物内容中不能包含图片，请发送文字内容~`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  // ⏳ 获取当前虚拟天数
-  const dayKey = ext.storageGet("global_days") || "UNDEFINED_DAY";
-
-  // 📅 每日配额逻辑（按虚拟天数）
-  let quotaMap = JSON.parse(ext.storageGet("a_dailyGiftQuota") || "{}");
-  if (!quotaMap[dayKey]) quotaMap[dayKey] = {};
-  let todayQuota = quotaMap[dayKey][sendname];
-
-  if (todayQuota === undefined) {
-    const quota = 100
-    quotaMap[dayKey][sendname] = quota;
-    ext.storageSet("a_dailyGiftQuota", JSON.stringify(quotaMap));
-  }
-
-  todayQuota = seal.ext.getIntConfig(ext, "giftDailyLimit");
-
-  // ⏳ 冷却机制
-  const cooldownKey = `cooldown_gift_${platform}_${uid}`;
-  let giftCooldownMin = seal.ext.getIntConfig(ext, "giftCooldown");
-  const cooldownSeconds = giftCooldownMin * 60;
-  
-  if (isInCooldown(cooldownKey, cooldownSeconds)) {
-    seal.replyToSender(ctx, msg, `发送失败，快递员仍在路上，片刻即归，请稍后再送~`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  let usedMap = JSON.parse(ext.storageGet("a_dailyGiftCount") || "{}");
-  if (!usedMap[dayKey]) usedMap[dayKey] = {};
-  const usedCount = usedMap[dayKey][sendname] || 0;
-  const quotaLeft = todayQuota - usedCount;
-
-  if (quotaLeft <= 0) {
-    seal.replyToSender(ctx, msg,
-      `🎁 今日你的礼物已超标，请等明天！`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  // ✉️ 通知收礼方
+  // 6. ✨ 执行投递 (修改通知文案)
+  const targetEntry = a_private_group[platform][toname];
   const newmsg = seal.newMessage();
   newmsg.messageType = "group";
-  newmsg.sender = {};
-  newmsg.sender.userId = `${platform}:${a_private_group[platform][toname][0]}`;
-  newmsg.groupId = `${platform}-Group:${a_private_group[platform][toname][1]}`;
+  newmsg.groupId = `${platform}-Group:${targetEntry[1]}`; 
   const newctx = seal.createTempCtx(ctx.endPoint, newmsg);
 
-  let senderMessage = `🎁 你已遣人送出一份礼物予「${toname}」。`;
-  if (isPresetGift) {
-    const presetGifts = JSON.parse(ext.storageGet("preset_gifts") || "{}");
-    const giftName = presetGifts[presetGiftId]?.name || presetGiftId;
-    senderMessage += `\n🎯 使用预设礼物：${giftName} (${presetGiftId})`;
-  } else {
-    senderMessage += `\n📝 自定义礼物内容：${giftContent}`;
-  }
+  // 对方收到的消息
+  const recipientMsg = `🎀 ${toname}，有一份来自「${sendname}」的快递：\n礼物：${giftDisplayName}\n寄语：「${giftContent}」`;
+  seal.replyToSender(newctx, newmsg, recipientMsg);
 
-  seal.replyToSender(ctx, msg, senderMessage);
+  // 7. 保存状态与回复
+  userStat.count += 1;
+  const currentNum = userStat.count;
+  const remainingNum = dailyLimit - currentNum;
 
-  let recipientMessage = `🎀${toname}, 有一份快递静静落在你桌前。\n`;
-  if (isPresetGift) {
-    const presetGifts = JSON.parse(ext.storageGet("preset_gifts") || "{}");
-    const giftName = presetGifts[presetGiftId]?.name || presetGiftId;
-    recipientMessage += `它来自「${sendname}」，是一份${giftName}——\n「${giftContent}」`;
-  } else {
-    recipientMessage += `它来自「${sendname}」，是——\n「${giftContent}」`;
-  }
-
-  seal.replyToSender(newctx, newmsg, recipientMessage);
-
-  setCooldown(cooldownKey);
-  recordMeetingAndAnnounce("礼物", platform, ctx, ctx.endPoint);
-
-  usedMap[dayKey][sendname] = usedCount + 1;
-  ext.storageSet("a_dailyGiftCount", JSON.stringify(usedMap));
+  globalStats[userKey] = userStat;
+  globalCooldowns[userKey] = now;
   
-  // 新增：送礼公开发送逻辑
-  const giftPublicSendEnabled = JSON.parse(ext.storageGet("gift_public_send") || "false");
-  if (giftPublicSendEnabled) {
-    const randomNum = Math.floor(Math.random() * 100) + 1; // 1-100
-    if (randomNum > 50) {
-      const groupId = JSON.parse(ext.storageGet("adminAnnounceGroupId") || "null");
-      if (groupId) {
-        const publicMsg = seal.newMessage();
-        publicMsg.messageType = "group";
-        publicMsg.groupId = `${platform}-Group:${groupId}`;
-        publicMsg.sender = {};
-        const publicCtx = seal.createTempCtx(ctx.endPoint, publicMsg);
-        
-        let publicNotice = `🎁 公开的礼物：\n来自「${sendname}」→「${toname}」\n`;
-        if (isPresetGift) {
-          const presetGifts = JSON.parse(ext.storageGet("preset_gifts") || "{}");
-          const giftName = presetGifts[presetGiftId]?.name || presetGiftId;
-          publicNotice += `礼物：${giftName} (${presetGiftId})\n内容：「${giftContent}」\n`;
-        } else {
-          publicNotice += `礼物：「${giftContent}」\n`;
-        }
-        publicNotice += `\n（随机数：${randomNum}，触发公开）`;
-        
-        seal.replyToSender(publicCtx, publicMsg, publicNotice);
-      }
-    }
+  ext.storageSet("global_gift_stats", JSON.stringify(globalStats));
+  ext.storageSet("global_gift_cooldowns", JSON.stringify(globalCooldowns));
+
+  // 自己收到的反馈也显示名字
+  seal.replyToSender(ctx, msg, `🎁 已成功将 ${giftDisplayName} 送往「${toname}」的房间。\n(今日第 ${currentNum}份，余 ${remainingNum}份)`);
+
+  // 8. 公开广播逻辑
+  const publicGroupId = JSON.parse(ext.storageGet("adminAnnounceGroupId") || "null");
+  const isPublic = JSON.parse(ext.storageGet("gift_public_send") || "false");
+  if (isPublic && Math.random() > 0.5 && publicGroupId) {
+      const pubMsg = seal.newMessage();
+      pubMsg.groupId = `${platform}-Group:${publicGroupId}`;
+      const pubCtx = seal.createTempCtx(ctx.endPoint, pubMsg);
+      seal.replyToSender(pubCtx, pubMsg, `📢 公开礼物：${sendname} -> ${toname}\n送出了：${giftDisplayName}`);
   }
+
+  recordMeetingAndAnnounce("礼物", platform, ctx, ctx.endPoint);
 
   return seal.ext.newCmdExecuteResult(true);
 };
@@ -4155,9 +3989,6 @@ cmdGroupNotice.solve = function(ctx, msg, cmdArgs) {
 。创建新角色 名字
 → 请使用你想用的qq进行注册，本系统不绑定群，仅识别账号
 
-。命运注册 名字
-→ 抽卡系统注册
-
 。私约 0000-0130 地点 对方名字
 。电话 0000-0030 对方名字
 → 发起私约和电话，时间请用四位数字表示，小时在前分钟在后；如果要同时约多人，请用 对方名字1/对方名字2 这样的格式。
@@ -4209,7 +4040,7 @@ cmdGroupNotice.solve = function(ctx, msg, cmdArgs) {
 3. 。群头衔 可以直接给玩家设置头衔（需要加百列是群主）
 
 📅 每日维持
-1. 。设置天数 D1
+1. 。设置天数 D1 清空
 2. 。发起官约（根据剧情需要）
 3. 。重置计数 all（清空次数）
 4. 。统一发心动信（在需要的节点统一发信）
@@ -4350,7 +4181,7 @@ cmd_refuse_request.solve = (ctx, msg, cmdArgs) => {
     const content = `📜 ${yourName}说：
 📅 ${item.day} ${item.time}
 📍 ${item.place}
-我来不了啊！。`;
+我来不了啊！`;
     notifySenderInGroup(platform, item.sendid, targetGroupId, content, ctx);
   } else {
     seal.replyToSender(ctx, msg, "⚠️ 无法找到对方的私密群组，通知发送失败");
@@ -4780,7 +4611,6 @@ cmd_grant_admin.solve = (ctx, msg, cmdArgs) => {
   } else {
     seal.replyToSender(ctx, msg, `⚠️ ${targetQQ} 已是管理员`);
   }
-  appendAdminLog("授权管理员", msg.sender.userId, `授权 ${targetQQ}`);
   return seal.ext.newCmdExecuteResult(true);
 };
 
@@ -4845,7 +4675,6 @@ cmd_revoke_admin.solve = (ctx, msg, cmdArgs) => {
   a_adminList[platform] = newList;
   ext.storageSet("a_adminList", JSON.stringify(a_adminList));
   seal.replyToSender(ctx, msg, `✅ 已撤销 ${targetUid} 的管理员身份`);
-  appendAdminLog("撤销管理员", msg.sender.userId, `撤销 ${targetUid}`);
   return seal.ext.newCmdExecuteResult(true);
 };
 
@@ -4905,48 +4734,10 @@ cmd_clear_admin.solve = (ctx, msg, cmdArgs) => {
 
   ext.storageSet("a_adminList", JSON.stringify({}));
   seal.replyToSender(ctx, msg, "✅ 所有平台的临时管理员已被清空");
-  appendAdminLog("清空管理员", msg.sender.userId, "清空全部平台管理员");
   return seal.ext.newCmdExecuteResult(true);
 };
 
 ext.cmdMap["清空管理员"] = cmd_clear_admin;
-
-
-let cmd_delete_request_by_id = seal.ext.newCmdItemInfo();
-cmd_delete_request_by_id.name = "删除请求ID";
-cmd_delete_request_by_id.help = "。删除请求ID 请求编号（如：8jlk4dk39f，管理员/骰主专用）";
-
-cmd_delete_request_by_id.solve = (ctx, msg, cmdArgs) => {
-  if (!isUserAdmin(ctx, msg)) {
-    seal.replyToSender(ctx, msg, `只有管理员或骰主可以删除请求`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  const targetId = cmdArgs.getArgN(1);
-  if (!targetId) {
-    seal.replyToSender(ctx, msg, `请输入有效的请求 ID`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  let appointmentList = JSON.parse(ext.storageGet("appointmentList") || "[]");
-  const idx = appointmentList.findIndex(req => req.id === targetId);
-  if (idx === -1) {
-    seal.replyToSender(ctx, msg, `未找到 ID 为 ${targetId} 的请求`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  const item = appointmentList[idx];
-  appointmentList.splice(idx, 1);
-  ext.storageSet("appointmentList", JSON.stringify(appointmentList));
-
-  let detail = item.type === "小群"
-    ? `${item.sendname} → ${item.toname} 的小群（${item.subtype} @${item.day} ${item.time}）`
-    : `${item.sendname} → ${item.toname} 的礼物「${item.gift}」`;
-
-  seal.replyToSender(ctx, msg, `✅ 已根据 ID 删除请求：${detail}`);
-  return seal.ext.newCmdExecuteResult(true);
-};
-ext.cmdMap["删除请求ID"] = cmd_delete_request_by_id;
 
 let cmd_list_all_requests = seal.ext.newCmdItemInfo();
 cmd_list_all_requests.name = "查看所有请求";
@@ -5215,12 +5006,11 @@ cmd_hard_reset.solve = (ctx, msg, cmdArgs) => {
         b_MultiGroupRequest: JSON.stringify({}),
         a_lockedSlots: JSON.stringify({}),
         a_private_group: JSON.stringify({}),
+        group_expire_info: JSON.stringify({}),   // 清空所有群组到期倒计时
         forum_posts: JSON.stringify([]),
         group: JSON.stringify([]),
         a_adminList: JSON.stringify({}),
         a_messageLog: JSON.stringify([]),
-        a_dailyLetterCount: JSON.stringify({}),
-        a_dailySecretLetterCount: JSON.stringify({}),
         a_meetingCount_call: "0",
         a_meetingCount_private: "0",
         a_meetingCount_letter: "0",
@@ -5312,13 +5102,35 @@ cmd_hard_reset.solve = (ctx, msg, cmdArgs) => {
         wx_channels: JSON.stringify({}), // 清空所有微信频道
         relationship_data: JSON.stringify({}), // 清空关系线内容
         
-        // 冷却计时器清空
-        gift_cooldowns: JSON.stringify({}),
-        mail_cooldowns: JSON.stringify({}),
-        
         // 游戏进度与标志位
         game_stage: "preparation", 
         global_flags: JSON.stringify({}),
+
+        // 1. 🆕 晚餐系统重置
+        dinner_system_data: JSON.stringify({}),
+        dinner_global_status: "未开始",
+
+        // 2. 🆕 微信系统重置
+        wechat_groups: JSON.stringify({}),
+        // 3. 🆕 NPC 列表重置
+        a_npc_list: JSON.stringify([]),
+
+        // 4. 🆕 物品/抽奖系统重置
+        sys_item_pool: JSON.stringify([]), // 清空抽奖池
+        global_inventories: JSON.stringify({}),   // 清空全服所有人背包
+        global_draw_records: JSON.stringify({}),
+
+        // 🆕 重置所有人的寄信限次
+        global_chaos_letter_counts: JSON.stringify({}), 
+        
+        // 建议顺便把冷却也重置了，防止初始化后还要等2分钟
+        chaos_letter_cooldown_data: JSON.stringify({}),
+        // 🆕 方案 C：送礼系统重置
+        global_gift_stats: JSON.stringify({}),     // 清空所有人每日送礼计数
+        global_gift_cooldowns: JSON.stringify({}), // 清空所有人送礼冷却
+        global_secret_letter_stats: JSON.stringify({}),
+        global_secret_letter_cooldowns: JSON.stringify({}),
+        global_shop_cooldowns: JSON.stringify({}), // 清空所有人逛商城的冷却
     };
 
     // 使用ext.storageSet逐个设置
@@ -5327,7 +5139,6 @@ cmd_hard_reset.solve = (ctx, msg, cmdArgs) => {
     }
 
     seal.replyToSender(ctx, msg, "✅ 全部存储项目已初始化为默认结构（含完整的地点系统）");
-    appendAdminLog("硬初始化", msg.sender.userId, "清空所有存储项");
     return seal.ext.newCmdExecuteResult(true);
 };
 
@@ -5335,40 +5146,60 @@ ext.cmdMap["强硬初始化"] = cmd_hard_reset;
 
 let cmd_reset_meeting_count = seal.ext.newCmdItemInfo();
 cmd_reset_meeting_count.name = "重置计数";
-cmd_reset_meeting_count.help = "。重置计数 call/private/letter/gift/wish/all";
+cmd_reset_meeting_count.help = "。重置计数 call/private/letter/gift/wish/all\n参数说明：\n- call: 电话\n- private: 私密\n- letter: 剧情信件\n- gift: 礼物(含限次)\n- wish: 心愿\n- all: 全部重置";
 
 cmd_reset_meeting_count.solve = (ctx, msg, cmdArgs) => {
-  if (!isUserAdmin(ctx, msg)) return seal.replyToSender(ctx, msg, "⚠️ 只有管理员可以重置会面计数"), seal.ext.newCmdExecuteResult(true);
+  if (!isUserAdmin(ctx, msg)) {
+    seal.replyToSender(ctx, msg, "⚠️ 只有管理员可以重置会面计数");
+    return seal.ext.newCmdExecuteResult(true);
+  }
 
   const target = (cmdArgs.getArgN(1) || "").toLowerCase();
   const platform = msg.platform;
   
-  // 1. 定义映射关系：参数名 -> [存储Key, 显示名称]
+  // 1. 定义映射关系：参数名 -> [存储Key列表, 显示名称]
+  // 这里的 Key 列表支持同时清理多个相关的 Storage Key
   const countMap = {
-    "call": ["a_meetingCount_call", "📞 电话会面"],
-    "private": ["a_meetingCount_private", "🤫 私密会面"],
-    "letter": ["a_meetingCount_letter", "📜 剧情信件往来"],
-    "gift": ["a_meetingCount_gift", "🎁 礼物馈赠"],
-    "wish": ["a_meetingCount_wish", "🌠 心愿达成"]
+    "call": [["a_meetingCount_call"], "📞 电话会面"],
+    "private": [["a_meetingCount_private"], "🤫 私密会面"],
+    "letter": [["a_meetingCount_letter", "a_meetingCount_chaosletter"], "📜 信件往来"],
+    "gift": [["a_meetingCount_gift", "global_gift_stats", "global_gift_cooldowns"], "🎁 礼物馈赠"],
+    "wish": [["a_meetingCount_wish"], "🌠 心愿达成"],
+    "secret": [["a_meetingCount_secretletter"], "💌 匿名信"]
   };
 
-  // 2. 筛选出需要重置的项目
-  const keysToReset = target === "all" ? Object.keys(countMap) : (countMap[target] ? [target] : []);
+  // 2. 确定需要重置的 Key 列表
+  let keysToProcess = [];
+  if (target === "all") {
+    keysToProcess = Object.keys(countMap);
+  } else if (countMap[target]) {
+    keysToProcess = [target];
+  }
 
-  if (keysToReset.length === 0) {
-    seal.replyToSender(ctx, msg, "⚠️ 参数错误，请使用：.重置计数 call/private/letter/gift/wish/all");
+  if (keysToProcess.length === 0) {
+    seal.replyToSender(ctx, msg, "⚠️ 参数错误，可选：call/private/letter/gift/wish/secret/all");
     return seal.ext.newCmdExecuteResult(true);
   }
 
-  // 3. 统一执行重置并收集名称
-  const clearedNames = keysToReset.map(key => {
-    const [storageKey, displayName] = countMap[key];
-    ext.storageSet(storageKey, "0");
-    return displayName;
+  // 3. 执行重置逻辑
+  const clearedNames = [];
+  keysToProcess.forEach(key => {
+    const [storageKeys, displayName] = countMap[key];
+    
+    storageKeys.forEach(sKey => {
+      // 如果是礼物大表或冷却表，重置为 {}，否则重置为 "0"
+      if (sKey === "global_gift_stats" || sKey === "global_gift_cooldowns") {
+        ext.storageSet(sKey, JSON.stringify({}));
+      } else {
+        ext.storageSet(sKey, "0");
+      }
+    });
+    
+    clearedNames.push(displayName);
   });
 
   // 4. 反馈结果
-  seal.replyToSender(ctx, msg, `✅ 已重置计数：${clearedNames.join("、")}`);
+  seal.replyToSender(ctx, msg, `✅ 已重置以下项目的计数与限制：\n${clearedNames.join("、")}`);
 
   // 5. 管理群通知
   const adminGid = JSON.parse(ext.storageGet("adminAnnounceGroupId") || "null");
@@ -5377,7 +5208,7 @@ cmd_reset_meeting_count.solve = (ctx, msg, cmdArgs) => {
     noticeMsg.messageType = "group";
     noticeMsg.groupId = `${platform}-Group:${adminGid}`;
     const noticeCtx = seal.createTempCtx(ctx.endPoint, noticeMsg);
-    seal.replyToSender(noticeCtx, noticeMsg, `📜 计数已经重置`);
+    seal.replyToSender(noticeCtx, noticeMsg, `📜 管理员已重置了 [${clearedNames.join("/")}] 的统计数据`);
   }
 
   return seal.ext.newCmdExecuteResult(true);
@@ -5402,7 +5233,7 @@ cmd_block_user_feature.solve = (ctx, msg, cmdArgs) => {
 
   // 🔧 新增“发起邀约”功能映射
   const featureMap = {
-    "信件": "enable_general_letter",
+    "剧情信件": "enable_general_letter",
     "礼物": "enable_general_gift",
     "发起邀约": "enable_general_appointment",
     "寄信": "enable_chaos_letter",
@@ -5449,7 +5280,7 @@ cmd_view_user_feature.solve = (ctx, msg, cmdArgs) => {
   }
 
   const featureLabelMap = {
-    enable_general_letter: "信件",
+    enable_general_letter: "剧情信件",
     enable_general_gift: "礼物",
     enable_general_appointment: "发起邀约",
     enable_chaos_letter: "寄信",
@@ -5486,119 +5317,130 @@ cmd_view_user_feature.solve = (ctx, msg, cmdArgs) => {
 };
 
 ext.cmdMap["查看功能权限"] = cmd_view_user_feature;
-// 修改匿名信指令的solve函数
+// === 匿名信指令：方案 C 完整版 ===
 let cmd_send_secretletter = seal.ext.newCmdItemInfo();
 cmd_send_secretletter.name = "匿名信";
-cmd_send_secretletter.help = "。匿名信 对方角色名 内容（匿名信件，可能暴露身份）";
+cmd_send_secretletter.help = "。匿名信 对方角色名 内容\n（注：基于当前游戏天数限次，初始化后自动重置）";
 
 cmd_send_secretletter.solve = (ctx, msg, cmdArgs) => {
-  const config = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
-  if (config.enable_secret_letter === false) {
-    seal.replyToSender(ctx, msg, "📪 匿名信功能已关闭，无法发送匿名信");
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  const platform = msg.platform;
-  const uid = msg.sender.userId.replace(`${platform}:`, "");
-  let a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
-  if (!a_private_group[platform]) a_private_group[platform] = {};
-
-  const toname = cmdArgs.getArgN(1);
-  if (!toname || !a_private_group[platform][toname]) {
-    seal.replyToSender(ctx, msg, `未找到收信人「${toname}」，请确认其已创建新角色。`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  const sendname = Object.keys(a_private_group[platform]).find(key => a_private_group[platform][key][0] === uid);
-  if (!sendname) {
-    seal.replyToSender(ctx, msg, `请先使用「创建新角色」绑定角色再使用此指令。`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  if (sendname === toname) {
-    seal.replyToSender(ctx, msg, `不能向自己发送匿名信件喔~`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  const match = msg.message.match(new RegExp(`匿名信 ${toname} ([\\s\\S]+)`));
-  if (!match || !match[1].trim()) {
-    seal.replyToSender(ctx, msg, `请输入要发送的信件内容。`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-  
-  const content = match[1].trim();
-
-  // 使用配置的冷却时间 - 修复这里！
-  const cooldownKey = `cooldown_secretletter_${platform}_${uid}`;
-  const secretLetterCooldownMin = seal.ext.getIntConfig(ext, "secretLetterCooldown");
-  const cooldownSeconds = secretLetterCooldownMin * 60; // 转换为秒
-  
-  // 检查冷却 - 使用统一的isInCooldown函数
-  if (isInCooldown(cooldownKey, cooldownSeconds)) {
-    seal.replyToSender(ctx, msg, `信鸽尚未归笼，${secretLetterCooldownMin}分钟后再试~`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  // 使用配置的每日次数限制
-  const today = new Date().toISOString().slice(0, 10);
-  let dailyMap = JSON.parse(ext.storageGet("a_dailySecretLetterCount") || "{}");
-  if (!dailyMap[today]) dailyMap[today] = {};
-  const dailyCount = dailyMap[today][sendname] || 0;
-  const dailyLimit = seal.ext.getIntConfig(ext, "secretLetterDailyLimit");
-  
-  if (dailyCount >= dailyLimit) {
-    seal.replyToSender(ctx, msg, `📪 今日匿名信件次数已达上限（${dailyLimit} 封），请明日再试。`);
-    return seal.ext.newCmdExecuteResult(true);
-  }
-
-  // 使用配置的暴露身份概率
-  const revealChance = seal.ext.getIntConfig(ext, "secretLetterRevealChance");
-  const reveal = revealChance > 0 ? (Math.random() * 100 < revealChance) : false;
-  const finalSignature = reveal ? `落款：${sendname}（似曾相识的笔迹…）` : `（落款人不详）`;
-
-  // 发送匿名信
-  const newmsg = seal.newMessage();
-  newmsg.messageType = "group";
-  newmsg.sender = {};
-  newmsg.sender.userId = `${platform}:${a_private_group[platform][toname][0]}`;
-  newmsg.groupId = `${platform}-Group:${a_private_group[platform][toname][1]}`;
-  const newctx = seal.createTempCtx(ctx.endPoint, newmsg);
-
-  seal.replyToSender(ctx, msg, `✉️ 你的匿名信已暗中飞入 ${toname} 的窗前。`);
-  seal.replyToSender(newctx, newmsg, `📜 ${toname}，你收到一封匿名信件：\n「${content}」\n\n${finalSignature}`);
-
-  // 记录次数与冷却 - 使用统一的setCooldown函数
-  setCooldown(cooldownKey);
-  dailyMap[today][sendname] = dailyCount + 1;
-  ext.storageSet("a_dailySecretLetterCount", JSON.stringify(dailyMap));
-
-  // 广播记录（可选）
-  recordMeetingAndAnnounce("匿名信", platform, ctx, ctx.endPoint);
-  
-  // 匿名信公开发送逻辑（使用配置的概率）
-  const secretLetterPublicSendEnabled = JSON.parse(ext.storageGet("secret_letter_public_send") || "false");
-  if (secretLetterPublicSendEnabled) {
-    const publicChance = seal.ext.getIntConfig(ext, "secretLetterPublicChance");
-    const randomNum = Math.floor(Math.random() * 100) + 1; // 1-100
-    
-    if (randomNum <= publicChance) {
-      const groupId = JSON.parse(ext.storageGet("adminAnnounceGroupId") || "null");
-      if (groupId) {
-        const publicMsg = seal.newMessage();
-        publicMsg.messageType = "group";
-        publicMsg.groupId = `${platform}-Group:${groupId}`;
-        publicMsg.sender = {};
-        const publicCtx = seal.createTempCtx(ctx.endPoint, publicMsg);
-        
-        const signatureInfo = reveal ? `（落款暴露：${sendname}）` : "（匿名发送）";
-        const publicNotice = `✉️ 公开的匿名信：\n发往「${toname}」\n内容：「${content}」\n${signatureInfo}\n\n（随机数：${randomNum}，触发概率：${publicChance}%）`;
-        seal.replyToSender(publicCtx, publicMsg, publicNotice);
-      }
+    // 1. 基础功能开关检查
+    const config = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
+    if (config.enable_secret_letter === false) {
+        seal.replyToSender(ctx, msg, "📪 匿名信功能已关闭。");
+        return seal.ext.newCmdExecuteResult(true);
     }
-  }
 
-  return seal.ext.newCmdExecuteResult(true);
+    // 2. 身份与权限识别
+    const platform = msg.platform;
+    const uid = msg.sender.userId.replace(`${platform}:`, "");
+    const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
+    
+    // 获取发送者角色名
+    const sendname = Object.keys(a_private_group[platform] || {}).find(
+        key => a_private_group[platform][key][0] === uid
+    );
+    if (!sendname) {
+        seal.replyToSender(ctx, msg, "⚠️ 请先创建并绑定角色。");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    // 获取目标信息
+    const toname = cmdArgs.getArgN(1);
+    if (!toname || !a_private_group[platform]?.[toname]) {
+        seal.replyToSender(ctx, msg, `❌ 未找到角色「${toname}」，请检查名称。`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+    if (sendname === toname) {
+        seal.replyToSender(ctx, msg, "⚠️ 不能向自己发送匿名信。");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    // 获取内容 (正则提取以支持多行)
+    const match = msg.message.match(new RegExp(`匿名信 ${toname} ([\\s\\S]+)`));
+    if (!match || !match[1].trim()) {
+        seal.replyToSender(ctx, msg, "用法：。匿名信 对方角色名 内容");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+    const content = match[1].trim();
+
+    // 3. 【方案 C 核心逻辑】限次与冷却检查
+    const gameDay = ext.storageGet("global_days") || "D0";
+    const dailyLimit = seal.ext.getIntConfig(ext, "secretLetterDailyLimit") || 5;
+    const cooldownMin = seal.ext.getIntConfig(ext, "secretLetterCooldown") || 10;
+    
+    // 从大表中读取
+    let globalStats = JSON.parse(ext.storageGet("global_secret_letter_stats") || "{}");
+    let globalCooldowns = JSON.parse(ext.storageGet("global_secret_letter_cooldowns") || "{}");
+
+    const currentNum = userStat.count;
+    const remainingNum = dailyLimit - userStat.count;
+
+    const userKey = `${platform}:${uid}`;
+    const now = Date.now();
+
+    // 冷却逻辑
+    const lastSent = globalCooldowns[userKey] || 0;
+    if (now - lastSent < cooldownMin * 60 * 1000) {
+        const remaining = Math.ceil((cooldownMin * 60 * 1000 - (now - lastSent)) / 60000);
+        seal.replyToSender(ctx, msg, `⏳ 信鸽尚未归笼，请 ${remaining} 分钟后再试~`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    // 次数限制逻辑 (基于 gameDay，初始化 global_days 后会自动重置)
+    let userStat = globalStats[userKey] || { day: "", count: 0 };
+    if (userStat.day !== gameDay) {
+        userStat = { day: gameDay, count: 0 };
+    }
+    if (userStat.count >= dailyLimit) {
+        seal.replyToSender(ctx, msg, `📪 今日匿名信件次数已达上限（${dailyLimit} 封）。`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    // 4. 发送处理 (暴露身份概率逻辑)
+    const revealChance = seal.ext.getIntConfig(ext, "secretLetterRevealChance") || 0;
+    const isRevealed = Math.random() * 100 < revealChance;
+    const finalSignature = isRevealed ? `落款：${sendname}（似曾相识的笔迹…）` : `（落款人不详）`;
+
+    // 构造跨群消息
+    const targetEntry = a_private_group[platform][toname];
+    const newmsg = seal.newMessage();
+    newmsg.messageType = "group";
+    newmsg.sender = {};
+    newmsg.sender.userId = `${platform}:${targetEntry[0]}`;
+    newmsg.groupId = `${platform}-Group:${targetEntry[1]}`;
+    const newctx = seal.createTempCtx(ctx.endPoint, newmsg);
+
+    // 5. 最终投递
+    seal.replyToSender(ctx, msg, `✉️ 你的匿名信已暗中飞入 ${toname} 的窗前。这是你今日寄出的第 ${currentNum} 封，今日剩余：${remainingNum}。`);
+    seal.replyToSender(newctx, newmsg, `📜 ${toname}，你收到一封匿名信件：\n「${content}」\n\n${finalSignature}`);
+
+    // 6. 状态持久化 (存回大表)
+    userStat.count += 1;
+    userStat.day = gameDay;
+    globalStats[userKey] = userStat;
+    globalCooldowns[userKey] = now;
+    
+    ext.storageSet("global_secret_letter_stats", JSON.stringify(globalStats));
+    ext.storageSet("global_secret_letter_cooldowns", JSON.stringify(globalCooldowns));
+
+    // 7. 公开发送逻辑 (如果有开启)
+    if (JSON.parse(ext.storageGet("secret_letter_public_send") || "false")) {
+        const publicChance = seal.ext.getIntConfig(ext, "secretLetterPublicChance") || 0;
+        if (Math.random() * 100 <= publicChance) {
+            const adminGroupId = JSON.parse(ext.storageGet("adminAnnounceGroupId") || "null");
+            if (adminGroupId) {
+                const pubMsg = seal.newMessage();
+                pubMsg.groupId = `${platform}-Group:${adminGroupId}`;
+                const pubCtx = seal.createTempCtx(ctx.endPoint, pubMsg);
+                const info = isRevealed ? `(已暴露: ${sendname})` : `(保持匿名)`;
+                seal.replyToSender(pubCtx, pubMsg, `📢 公开匿名信：\n发往「${toname}」\n内容：「${content}」\n${info}`);
+            }
+        }
+    }
+
+    return seal.ext.newCmdExecuteResult(true);
 };
+
 ext.cmdMap["匿名信"] = cmd_send_secretletter;
 // ========================
 // 🌠 挂心愿指令（使用类似私约的时间格式）
@@ -6115,8 +5957,7 @@ cmd_send_chaos_letter.solve = (ctx, msg, cmdArgs) => {
   }
 
   // 检查该角色是否被禁止使用寄信功能
-  const blockMap = JSON.parse(ext.storageGet("feature_user_blocklist") || "{}");
-  if (blockMap[sendname] && blockMap[sendname].enable_chaos_letter === false) {
+  if (!isUserFeatureEnabled(sendname, "enable_chaos_letter")) {
     seal.replyToSender(ctx, msg, `🚫 您已被禁止使用寄信功能`);
     return seal.ext.newCmdExecuteResult(true);
   }
@@ -6151,18 +5992,33 @@ cmd_send_chaos_letter.solve = (ctx, msg, cmdArgs) => {
   }
   ext.storageSet(cooldownKey, now.toString());
 
-  // 📅 每日寄信次数限制：使用配置中的dailyLimit
-  const gameDay = ext.storageGet("global_days") || "D0"; // 默认 D0 防止未设置
-  const dailyLimitKey = `chaos_letter_daily_${platform}:${uid}_${gameDay}`;
-  let dailyCount = parseInt(ext.storageGet(dailyLimitKey) || "0");
+  // 📅 每日寄信次数限制 (方案 C 大表版)
+  const gameDay = ext.storageGet("global_days") || "D0"; 
+  const globalChaosCounts = JSON.parse(ext.storageGet("global_chaos_letter_counts") || "{}");
+  const userKey = `${platform}:${uid}`;
 
-  if (dailyCount >= chaosConfig.dailyLimit) {
+  // 获取该用户记录
+  let userRec = globalChaosCounts[userKey] || { day: "", count: 0 };
+  
+  // 如果天数对不上（新的一天或重置了），重置计数
+  if (userRec.day !== gameDay) {
+    userRec = { day: gameDay, count: 0 };
+  }
+
+  if (userRec.count >= chaosConfig.dailyLimit) {
     seal.replyToSender(ctx, msg, `🕊️ 今日寄信次数已达上限（${chaosConfig.dailyLimit}次），请明日再试`);
     return seal.ext.newCmdExecuteResult(true);
   }
 
-  // 记录本次使用
-  ext.storageSet(dailyLimitKey, (dailyCount + 1).toString());
+  // 记录本次使用 (保存回大表)
+  userRec.count += 1;
+  userRec.day = gameDay;
+  globalChaosCounts[userKey] = userRec;
+  ext.storageSet("global_chaos_letter_counts", JSON.stringify(globalChaosCounts));
+
+  // 计算当前是第几封和剩余封数
+  const currentNum = userRec.count;
+  const remainingNum = chaosConfig.dailyLimit - userRec.count;
 
   const toname = cmdArgs.getArgN(1);
   const raw = msg.message.match(new RegExp(`寄信 ${toname} ([\\s\\S]+)`));
@@ -6342,21 +6198,29 @@ cmd_send_chaos_letter.solve = (ctx, msg, cmdArgs) => {
   let finalSignature = `落款：${sendname}`;
 
 const nameVariants = {
-  fuzzy: ["某位阁下", "旧日友人", "花园过客", "石廊低语", "？", "……"],
+  fuzzy: ["某位阁下", "昨晚托梦给你的那位","你的头号黑粉","一个不愿意透露姓名的路人甲","那个谁（突然忘了叫啥）","？", "……"],
   mistaken: Object.keys(a_private_group[platform]).filter(n => n !== sendname),
   poetic: [
-  "藏在钟楼里的香肠",
-  "躲在香肠后的我",
-  "深夜偷吃葡萄干者",
-  "前任的现任的狗",
-  "每天五次撞头的人",
-  "左脚踩到了右脚",
-  "来自厨房的呼唤",
-  "洗澡时想到你的人",
-  "你家楼下的鸟",
-  "马戏团的第二只猩猩",
-  "我不是你想的那种人",
-  "马桶边的沉思者"
+    "正在找拖鞋的哲学家",
+    "被生活放鸽子的养鸽人",
+    "欠费停机的纯爱灵魂",
+    "火锅店编外评论家",
+    "深夜谈判的蚊子受害者",
+    "仙人掌杀手",
+    "正在等外卖的救世主",
+    "刚把糖当盐撒的厨子",
+    "试图感化蚊子的圣人",
+    "没带准考证的梦中勇士",
+    "购物车里的定居者",
+    "闹钟暗杀计划执行人",
+    "正在自闭的野生影帝",
+    "想退休的带薪摸鱼家",
+    "袜子攒了一盆的人",
+    "临期面包品鉴师",
+    "离家出走的良心本人",
+    "早八魂的破碎残片",
+    "在淋浴头下开演唱会的巨星",
+    "那个忘了买邮票的穷鬼"
 ]
 };
 
@@ -6394,11 +6258,13 @@ const nameVariants = {
   const newctx = seal.createTempCtx(ctx.endPoint, newmsg);
 
   const notice = `📜 ${toname}，你收到一封书信：\n「${content}」\n\n${finalSignature}`;
-  seal.replyToSender(ctx, msg, ` 发送成功，一只鸽子已飞出……`);
+  // 修改这里的回复话术
+  const successReply = `🕊️ 发送成功！这是你今日投递的第 ${currentNum} 封信，今日还可发送 ${remainingNum} 封。一只鸽子已向远方飞去……`;
+  seal.replyToSender(ctx, msg, successReply);
   seal.replyToSender(newctx, newmsg, notice);
 
   // 📣 广播事件（如有需记录）
-  recordMeetingAndAnnounce?.("剧情信件", platform, ctx, ctx.endPoint);
+  recordMeetingAndAnnounce?.("寄信", platform, ctx, ctx.endPoint);
 
   // 🆕 新增：寄信公开发送逻辑
   const letterPublicSendEnabled = JSON.parse(ext.storageGet("letter_public_send") || "false");
@@ -8694,8 +8560,8 @@ function saveUserStats(stats) {
 }
 
 /**
- * 初始化群组计时器（最终优化版）
- * 修改：将被发起者初始设为 replied，取消 waiting 状态
+ * 初始化群组计时器（修正版）
+ * 修改：过滤掉已拒绝的参与者
  */
 function initGroupTimer(platform, groupId, subtype, participants, initiator) {
     const settings = getMonitorSettings();
@@ -8714,15 +8580,18 @@ function initGroupTimer(platform, groupId, subtype, participants, initiator) {
     if (multiGroup && multiGroup.targetList) {
         activeParticipants = participants.filter(participant => {
             const status = multiGroup.targetList[participant];
+            // 只包括已接受和待回应的参与者
             return status === "accepted" || status === null;
         });
     }
     
+    // 如果没有活跃参与者，不创建计时器
     if (activeParticipants.length === 0) return;
     
     const timers = getGroupTimers();
     const now = Date.now();
     
+    // 根据类型获取超时时间
     const getTimeout = (type) => {
         switch(type) {
             case "电话": return settings.timeout_phone;
@@ -8733,124 +8602,140 @@ function initGroupTimer(platform, groupId, subtype, participants, initiator) {
         }
     };
     
+    // 判断计时模式：2人使用轮流模式，多人使用独立模式
     const isTwoPerson = activeParticipants.length === 2;
     
+    // 初始化计时器状态
     const timerData = {
         platform: platform,
-        groupId: String(groupId), // 强制转为字符串
+        groupId: groupId,
         subtype: subtype,
         startTime: now,
-        participants: activeParticipants,
+        participants: activeParticipants, // 使用过滤后的参与者
         timerStatus: {},
         lastRemindTime: null,
         timeoutDuration: getTimeout(subtype),
-        // 建议：由于逻辑已统一，甚至可以不再区分 mode，但在你原有框架下我们保留它
         timerMode: isTwoPerson ? "turn_taking" : "independent"
     };
-
-    // --- 核心修改：统一分配初始状态 ---
-    activeParticipants.forEach(participant => {
-        const isInitiator = (participant === initiator);
+    
+    if (isTwoPerson) {
+        // 一对一邀约：轮流模式
+        timerData.timerStatus[initiator] = {
+            status: "timing",
+            startTime: now,
+            repliedTime: null,
+            wordCount: 0,
+            remindedTimes: 0,
+            isInitiator: true
+        };
         
-        if (isInitiator) {
-            // 发起人：进入计时状态（他在第一轮必须说话）
-            timerData.timerStatus[participant] = {
-                status: "timing",
-                startTime: now,
+        const receiver = activeParticipants.find(p => p !== initiator);
+        if (receiver) {
+            timerData.timerStatus[receiver] = {
+                status: "waiting",
+                startTime: null,
                 repliedTime: null,
-                wordCount: 0,
-                remindedTimes: 0,
-                isInitiator: true
-            };
-        } else {
-            // 被发起者：初始设为 replied（已回复）
-            // 这样他们不会触发超时提醒，直到发起人回复达标重置他们，或者他们主动抢话
-            timerData.timerStatus[participant] = {
-                status: "replied", 
-                startTime: null, // 尚未开始这一轮计时
-                repliedTime: now,
                 wordCount: 0,
                 remindedTimes: 0,
                 isInitiator: false
             };
         }
-    });
+    } else {
+        // 多人邀约：独立模式
+        activeParticipants.forEach(participant => {
+            const isInitiator = participant === initiator;
+            timerData.timerStatus[participant] = {
+                status: "timing", // 独立模式中，所有人一开始都计时
+                startTime: now,
+                repliedTime: null,
+                wordCount: 0,
+                remindedTimes: 0,
+                isInitiator: isInitiator
+            };
+        });
+    }
     
-    timers[String(groupId)] = timerData; 
+    timers[groupId] = timerData;
     saveGroupTimers(timers);
     
-    console.log(`[监听系统] 初始化成功。发起者 [${initiator}] 计时中，其余 ${activeParticipants.length - 1} 人设为备战(replied)状态。`);
+    console.log(`[监听系统] 初始化群组 ${groupId} 的计时器，参与者：${activeParticipants.join(',')}，模式：${isTwoPerson ? '轮流模式' : '独立模式'}`);
 }
 
+/**
+ * 处理回复（监听消息时调用）
+ * 修改：独立模式下，每个人回复后保持"已回复"状态，不改变其他人状态
+ */
 function handleReply(platform, groupId, roleName, message) {
+
     const settings = getMonitorSettings();
-    if (!settings.enabled) return false;
-    
-    const timers = getGroupTimers();
-    const timer = timers[String(groupId)]; 
-    if (!timer) return false;
-    
-    const roleStatus = timer.timerStatus[roleName];
-    if (!roleStatus) return false;
-
-    // --- 【关键修改】全模式状态自动回转 ---
-    // 无论什么模式，如果角色当前是 replied 状态（含初始化的被发起者），
-    // 只要他说话，就临时切回 timing 状态进行字数校验。
-    if (roleStatus.status === "replied") {
-        roleStatus.status = "timing";
-    }
-
-    // 此时 waiting 状态或不达标的状态依然会被拦截
-    if (roleStatus.status !== "timing") return false;
-    
-    const wordCount = countWords(message);
-    const minWords = getMinWords(timer.subtype);
-    
-    // 如果字数不够，我们要把状态还原回 replied，防止其意外开启计时
-    if (wordCount < minWords) {
-        // 如果是原本就在 replied 状态且字数不足，维持 replied
-        // 这里可以根据需求决定是否记录 roleStatus.status 的原始值
+    if (!settings.enabled) {
         return false;
     }
-
-    // --- 校验通过，开始更新数据 ---
-    const now = Date.now();
     
-    // 如果 startTime 为空（比如初始为 replied 的人第一次说话），用当前时间作为起始点
-    const startTime = roleStatus.startTime || now;
-    updateUserStats(platform, roleName, wordCount, startTime, now);
-
-    if (timer.timerMode === "independent") {
-        // --- 多人模式：精准重置 ---
-        for (const name in timer.timerStatus) {
-            const status = timer.timerStatus[name];
-            // 1. 刚才说话的那个人：重置进入新一轮
-            // 2. 之前已经回过的人(replied)：重置进入新一轮（被刚才说话的人“激活”了）
-            // 3. 还没回的人(timing)：保持原样，不刷新 startTime，继续催促
-            if (name === roleName || status.status === "replied") {
-                status.status = "timing";
-                status.startTime = now; 
-                status.repliedTime = null;
-                status.wordCount = 0;
-                status.remindedTimes = 0;
-            }
-        }
-    } else {
-        // --- 两人模式：严格轮流但支持“抢话” ---
-        roleStatus.status = "replied";
-        roleStatus.repliedTime = now;
-        
-        const otherName = timer.participants.find(p => p !== roleName);
-        if (otherName && timer.timerStatus[otherName]) {
-            const other = timer.timerStatus[otherName];
-            // 无论对方在做什么，轮到对方说话了
-            other.status = "timing";
-            other.startTime = now;
-            other.remindedTimes = 0;
-        }
+    const timers = getGroupTimers();
+    const timer = timers[groupId];
+    if (!timer) {
+        return false;
     }
     
-    saveGroupTimers(timers); // 使用你定义的保存函数
+    const roleStatus = timer.timerStatus[roleName];
+    if (!roleStatus) {
+        console.warn(`[监听系统] 处理失败: 角色 [${roleName}] 不在当前计时的参与者名单中`);
+        return false;
+    }
+    
+    // 检查状态
+    console.log(`[监听系统] 角色 [${roleName}] 当前状态: ${roleStatus.status}, 模式: ${timer.timerMode}`);
+    
+    if (roleStatus.status !== "timing") {
+        console.warn(`[监听系统] 忽略回复: [${roleName}] 的状态不是 "timing" (计时中)，当前状态为 "${roleStatus.status}"`);
+        return false;
+    }
+    
+    // 计算字数
+    const wordCount = countWords(message);
+    const minWords = getMinWords(timer.subtype);
+    console.log(`[监听系统] 字数统计: 当前输入 ${wordCount} 字, 最低要求 ${minWords} 字`);
+    
+    // 检查是否达到最低字数要求
+    if (wordCount < minWords) {
+        console.warn(`[监听系统] 忽略回复: 字数不足 (需要 ${minWords} 字，实际 ${wordCount} 字)`);
+        return false;
+    }
+    
+    // --- 校验通过，开始更新数据 ---
+    
+    // 记录回复
+    roleStatus.status = "replied";
+    roleStatus.repliedTime = Date.now();
+    roleStatus.wordCount = wordCount;
+    
+    // 更新用户统计
+    updateUserStats(platform, roleName, wordCount, roleStatus.startTime, roleStatus.repliedTime);
+    
+    // 根据计时模式处理下一步
+    if (timer.timerMode === "turn_taking") {
+        const otherParticipant = timer.participants.find(p => p !== roleName);
+        
+        if (otherParticipant) {
+            const otherStatus = timer.timerStatus[otherParticipant];
+            if (otherStatus) {
+                otherStatus.status = "timing";
+                otherStatus.startTime = Date.now();
+                otherStatus.repliedTime = null;
+                otherStatus.wordCount = 0;
+                otherStatus.remindedTimes = 0;
+                console.log(`[监听系统] 轮流模式: 下一位角色 [${otherParticipant}] 已进入计时状态`);
+            }
+        } else {
+            console.log(`[监听系统] 轮流模式: 未找到另一位参与者`);
+        }
+    } else {
+        console.log(`[监听系统] 独立模式: 角色 [${roleName}] 回复成功，不影响其他人的计时状态`);
+    }
+    
+    saveGroupTimers(timers);
+    
     return true;
 }
 
@@ -8859,16 +8744,18 @@ function handleReply(platform, groupId, roleName, message) {
  */
 function countWords(text) {
     if (!text) return 0;
+    
     // 移除CQ码
-    const cleanText = text.replace(/\[CQ:[^\]]*\]/g, '').trim();
-    if (!cleanText) return 0;
+    const cleanText = text.replace(/\[CQ:[^\]]*\]/g, '');
     
-    // 【修改点】统计中文字符 + 英文单词/数字/符号Token
+    // 统计中文字符
     const chineseChars = (cleanText.match(/[\u4e00-\u9fa5]/g) || []).length;
-    const otherTokens = cleanText.replace(/[\u4e00-\u9fa5]/g, '').trim().split(/\s+/).filter(t => t.length > 0).length;
     
-    // 取逻辑统计值和物理长度的平衡，确保有内容就不会是0
-    return Math.max(chineseChars + otherTokens, 1);
+    // 统计英文单词（按空格分割）
+    const englishText = cleanText.replace(/[\u4e00-\u9fa5]/g, '');
+    const englishWords = englishText.trim().split(/\s+/).filter(word => word.length > 0).length;
+    
+    return chineseChars + englishWords;
 }
 
 /**
@@ -9959,31 +9846,6 @@ ext.cmdMap["检查计时器设置"] = cmd_check_timer_settings;
 // 💬 微信长期群聊功能（修改版）
 // ========================
 
-// 🔧 微信功能开关
-let cmd_wechat_toggle = seal.ext.newCmdItemInfo();
-cmd_wechat_toggle.name = "开关微信";
-cmd_wechat_toggle.help = "。开关微信 开启/关闭 - 开启或关闭微信功能";
-cmd_wechat_toggle.solve = (ctx, msg, cmdArgs) => {
-    if (!isUserAdmin(ctx, msg)) {
-        seal.replyToSender(ctx, msg, "该指令仅限管理员使用");
-        return seal.ext.newCmdExecuteResult(true);
-    }
-
-    const action = cmdArgs.getArgN(1);
-    if (!action || (action !== "开启" && action !== "关闭")) {
-        seal.replyToSender(ctx, msg, "请指定：开启 或 关闭");
-        return seal.ext.newCmdExecuteResult(true);
-    }
-
-    let config = JSON.parse(ext.storageGet("global_feature_toggle") || "{}");
-    config.enable_wechat = action === "开启";
-    ext.storageSet("global_feature_toggle", JSON.stringify(config));
-
-    seal.replyToSender(ctx, msg, `✅ 微信功能已${action}`);
-    return seal.ext.newCmdExecuteResult(true);
-};
-ext.cmdMap["开关微信"] = cmd_wechat_toggle;
-
 // 🔧 检查两人之间是否已有活跃微信群
 function checkWechatBetweenUsers(platform, user1, user2) {
     const wechatGroups = JSON.parse(ext.storageGet("wechat_groups") || "{}");
@@ -10122,7 +9984,7 @@ cmd_wechat.solve = (ctx, msg, cmdArgs) => {
     for (let toname of names) {
         // 检查对方是否已绑定
         if (!a_private_group[platform] || !a_private_group[platform][toname]) {
-            failed.push(`${toname}（未绑定）`);
+            failed.push(`${toname}（未注册）`);
             continue;
         }
 
@@ -10887,6 +10749,45 @@ cmd_members_spec.name = "查看指定群成员";
 cmd_members_spec.solve = solveGroupMembers;
 ext.cmdMap[cmd_members_spec.name] = cmd_members_spec;
 
+// === 🛡️ 指令：。审查私密群 ===
+let cmd_audit_full = seal.ext.newCmdItemInfo();
+cmd_audit_full.name = "审查私密群";
+cmd_audit_full.help = "直接输出 NPC 缺失或玩家重合的结果。";
+
+cmd_audit_full.solve = (ctx, msg) => {
+    if (!isUserAdmin(ctx, msg)) return seal.replyToSender(ctx, msg, "⚠️ 权限不足");
+
+    const platform = msg.platform;
+    const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
+    const npcList = JSON.parse(ext.storageGet("a_npc_list") || "[]");
+    
+    const playerList = Object.entries(a_private_group[platform] || {})
+        .filter(([name]) => !npcList.includes(name));
+
+    if (playerList.length === 0) return seal.replyToSender(ctx, msg, "📭 无玩家记录");
+
+    seal.replyToSender(ctx, msg, `🔍 正在核对 ${playerList.length} 个私密群...`);
+
+    // 循环发起请求
+    playerList.forEach(([ownerName, data]) => {
+        const gid = data[1];
+
+        // 核心技巧：通过延迟或存储位标记当前处理的群
+        // 这里的 ws 是你原本的 function ws
+        setTimeout(() => {
+            // 设置一个临时标记，让 handleMemberListResponse 知道这是在审查谁
+            ext.storageSet("temp_audit_owner", ownerName);
+            
+            ws({
+                "action": "get_group_member_list",
+                "params": { "group_id": parseInt(gid, 10) }
+            }, ctx, msg, null); 
+        }, 100); 
+    });
+
+    return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap["审查私密群"] = cmd_audit_full;
 
 // 注册开关与概率
 seal.ext.registerBoolConfig(ext, "开启心动信曝光", false, "开启后，信件有概率同步发送到指定的公告群");
@@ -10939,7 +10840,6 @@ cmd_send_lovemail.solve = (ctx, msg, cmdArgs) => {
         helpMsg += `【发送对象】角色名\n`;
         helpMsg += `【内容】想说的话\n`;
         helpMsg += `【署名】自定义昵称（选填，不填默认使用群名片）\n`;
-        helpMsg += `\n✨ 提示：可以连续输入，标签顺序不限。`;
         
         seal.replyToSender(ctx, msg, helpMsg);
         return seal.ext.newCmdExecuteResult(true);
@@ -11469,192 +11369,306 @@ function sendTextToGroup(platform, gid, text) {
 
 // 启动
 registerLoveMailSystem();
-
+// === 基础配置与工具函数 ===
 seal.ext.registerIntConfig(ext, "dailyDrawLimit", 2, "每日抽取次数上限");
-function getPoolData() { return JSON.parse(ext.storageGet("sys_item_pool") || "[]"); }
-function setPoolData(data) { ext.storageSet("sys_item_pool", JSON.stringify(data)); }
-function getPlayerInv(uid) { return JSON.parse(ext.storageGet(`inv_${uid}`) || "[]"); }
-function setPlayerInv(uid, data) { ext.storageSet(`inv_${uid}`, JSON.stringify(data)); }
 
-// 获取今日日期字符串 (YYYY-MM-DD) 用于限次判断
-function getTodayStr() {
-    const d = new Date();
-    return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-}
+// 获取当前角色的工具函数
+const ItemRoleUtils = {
+    // 1. 获取角色标识 (平台+角色名)
+    getRoleKey: (ctx, msg) => {
+        const platform = msg.platform;
+        const uid = msg.sender.userId.replace(`${platform}:`, "");
+        const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
+        const roleName = Object.entries(a_private_group[platform] || {})
+            .find(([_, val]) => val[0] === uid)?.[0];
+        return roleName ? `${platform}:${roleName}` : null;
+    },
 
-// === 1. 管理员指令：投放 ===
+    // 2. 获取池子数据
+    getPool: () => JSON.parse(ext.storageGet("sys_item_pool") || "[]"),
+    setPool: (data) => ext.storageSet("sys_item_pool", JSON.stringify(data)),
+
+    // 3. 【方案C核心】全服背包管理
+    getGlobalInvs: () => JSON.parse(ext.storageGet("global_inventories") || "{}"),
+    setGlobalInvs: (data) => ext.storageSet("global_inventories", JSON.stringify(data)),
+
+    // 获取特定角色的背包
+    getInv: (roleKey) => {
+        const invs = ItemRoleUtils.getGlobalInvs();
+        return invs[roleKey] || [];
+    },
+    // 保存特定角色的背包
+    setInv: (roleKey, inv) => {
+        const invs = ItemRoleUtils.getGlobalInvs();
+        invs[roleKey] = inv;
+        ItemRoleUtils.setGlobalInvs(invs);
+    },
+
+    // 4. 抽取记录 (建议也存入大表，方便初始化一键重置)
+    getGlobalRecords: () => JSON.parse(ext.storageGet("global_draw_records") || "{}"),
+    setGlobalRecords: (data) => ext.storageSet("global_draw_records", JSON.stringify(data)),
+
+    getToday: () => {
+        const d = new Date();
+        return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+    }
+};
+
+// === 管理员指令：投放与管理池子 ===
 let cmd_item_admin = seal.ext.newCmdItemInfo();
 cmd_item_admin.name = "投放";
+cmd_item_admin.help = "【管理员指令】\n。投放 添加 物品名|描述|数量 —— 批量向池子投放物资\n。投放 查看池子 —— 查看当前池内剩余物资统计\n。投放 移除 物品名 —— 从池子里删掉一个特定物品\n。投放 清空池子 —— 彻底清空物资池";
+
 cmd_item_admin.solve = (ctx, msg, cmdArgs) => {
+    // 权限检查
     if (!isUserAdmin(ctx, msg)) {
-        seal.replyToSender(ctx, msg, "❌ 权限不足。");
+        seal.replyToSender(ctx, msg, "❌ 权限不足，仅管理员可操作物资池。");
         return seal.ext.newCmdExecuteResult(true);
     }
-    const subCmd = cmdArgs.getArgN(1);
-    let pool = getPoolData();
 
+    const subCmd = cmdArgs.getArgN(1);
+    let pool = ItemRoleUtils.getPool();
+
+    // 1. 手动加东西 (。投放 添加 物品名|描述|数量)
     if (subCmd === '添加') {
         const rawInput = cmdArgs.getArgN(2);
         if (!rawInput) {
-            seal.replyToSender(ctx, msg, "用法：。投放 添加 物品名|描述|数量");
+            seal.replyToSender(ctx, msg, "用法错误！示例：。投放 添加 肾上腺素|急救用药品|5");
             return seal.ext.newCmdExecuteResult(true);
         }
+
         const parts = rawInput.split('|');
         const name = (parts[0] || "无名物品").trim();
-        const desc = (parts[1] || "无描述").trim();
+        const desc = (parts[1] || "该物品没有任何描述").trim();
         const count = parseInt(parts[2]) || 1;
+
+        if (name === "") return seal.replyToSender(ctx, msg, "❌ 物品名不能为空。");
+
+        // 循环加入池子
         for (let i = 0; i < count; i++) {
-            pool.push({ name: name, desc: desc, used: false });
+            pool.push({
+                name: name,
+                desc: desc,
+                used: false,
+                createTime: new Date().getTime()
+            });
         }
-        setPoolData(pool);
-        seal.replyToSender(ctx, msg, `📦 投放成功：【${name}】x${count}\n池内共有 ${pool.length} 件。`);
+
+        ItemRoleUtils.setPool(pool);
+        seal.replyToSender(ctx, msg, `✅ 投放成功！\n物品：【${name}】\n数量：${count} 件\n描述：${desc}\n目前池内总计：${pool.length} 件物资。`);
+
+    // 2. 查看池子 (。投放 查看池子)
+    } else if (subCmd === '查看池子' || subCmd === '查看') {
+        if (pool.length === 0) {
+            seal.replyToSender(ctx, msg, "📋 当前物资池空空如也，请先使用「。投放 添加」放入物资。");
+            return seal.ext.newCmdExecuteResult(true);
+        }
+
+        // 按名称统计数量
+        const stats = pool.reduce((acc, item) => {
+            acc[item.name] = (acc[item.name] || 0) + 1;
+            return acc;
+        }, {});
+
+        let text = `📋 物资池状态 (总计: ${pool.length} 件)：\n`;
+        for (let name in stats) {
+            text += `· ${name}：共 ${stats[name]} 件\n`;
+        }
+        text += `\n💡 玩家使用「。抽取」指令时将从中随机获得一件。`;
+        
+        seal.replyToSender(ctx, msg, text.trim());
+
+    // 3. 移除特定物品 (。投放 移除 物品名)
     } else if (subCmd === '移除') {
-        const name = cmdArgs.getArgN(2);
-        const index = pool.findIndex(i => i.name === name);
+        const targetName = cmdArgs.getArgN(2);
+        const index = pool.findIndex(i => i.name === targetName);
+        
         if (index > -1) {
             pool.splice(index, 1);
-            setPoolData(pool);
-            seal.replyToSender(ctx, msg, `🗑️ 已移除一个：【${name}】`);
+            ItemRoleUtils.setPool(pool);
+            seal.replyToSender(ctx, msg, `🗑️ 已从池子中移除一件【${targetName}】。剩余：${pool.length} 件。`);
         } else {
-            seal.replyToSender(ctx, msg, `❌ 池内无此物品。`);
+            seal.replyToSender(ctx, msg, `❌ 池子中没有名为【${targetName}】的物品。`);
         }
-    } else if (subCmd === '查看池子') {
-        if (pool.length === 0) {
-            seal.replyToSender(ctx, msg, "池子是空的。");
-        } else {
-            const counts = pool.reduce((acc, item) => { acc[item.name] = (acc[item.name] || 0) + 1; return acc; }, {});
-            let text = "📋 池内统计：\n";
-            for (let n in counts) text += `· ${n} (x${counts[n]})\n`;
-            seal.replyToSender(ctx, msg, text.trim());
+
+    // 4. 清空池子
+    } else if (subCmd === '清空池子') {
+        ItemRoleUtils.setPool([]);
+        seal.replyToSender(ctx, msg, "☢️ 物资池已彻底清空。");
+
+    } // 5. 手动给特定玩家加东西 (。投放 给予 角色名|物品名|描述)
+    else if (subCmd === '给予' || subCmd === '发放') {
+        const rawInput = cmdArgs.getArgN(2);
+        if (!rawInput) {
+            seal.replyToSender(ctx, msg, "用法错误！示例：。投放 给予 张三|神秘钥匙|一把发光的钥匙");
+            return seal.ext.newCmdExecuteResult(true);
         }
+
+        const parts = rawInput.split('|');
+        const targetRoleName = (parts[0] || "").trim();
+        const itemName = (parts[1] || "").trim();
+        const itemDesc = (parts[2] || "管理员发放的物品").trim();
+
+        if (!targetRoleName || !itemName) return seal.replyToSender(ctx, msg, "❌ 格式错误：角色名和物品名不能为空。");
+
+        const platform = msg.platform;
+        const targetKey = `${platform}:${targetRoleName}`;
+
+        // 验证角色是否存在于 a_private_group
+        const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
+        if (!a_private_group[platform]?.[targetRoleName]) {
+            return seal.replyToSender(ctx, msg, `❌ 错误：角色「${targetRoleName}」未登记。`);
+        }
+
+        // 获取并更新该角色的背包
+        let inv = ItemRoleUtils.getInv(targetKey);
+        inv.push({
+            name: itemName,
+            desc: itemDesc,
+            used: false,
+            createTime: new Date().getTime(),
+            source: "Admin" // 标记来源
+        });
+        
+        ItemRoleUtils.setInv(targetKey, inv);
+        seal.replyToSender(ctx, msg, `✅ 已手动向角色【${targetRoleName}】的背包发放：【${itemName}】`);
+
+    } else {
+        const ret = seal.ext.newCmdExecuteResult(true);
+        ret.showHelp = true;
+        return ret;
     }
+
+    
+
     return seal.ext.newCmdExecuteResult(true);
 };
+
 ext.cmdMap["投放"] = cmd_item_admin;
 
-// === 2. 玩家指令：抽取 (含每日限次) ===
+// === 玩家指令：抽取 ===
 let cmd_item_draw = seal.ext.newCmdItemInfo();
 cmd_item_draw.name = "抽取";
-cmd_item_draw.solve = (ctx, msg, cmdArgs) => {
-    const uid = ctx.player.userId;
-    const today = getTodayStr();
+cmd_item_draw.solve = (ctx, msg) => {
+    const roleKey = ItemRoleUtils.getRoleKey(ctx, msg);
+    if (!roleKey) return seal.replyToSender(ctx, msg, "⚠️ 请先创建并绑定角色。");
+
+    const today = ItemRoleUtils.getToday();
     const limit = seal.ext.getIntConfig(ext, "dailyDrawLimit");
 
-    // 读取抽取记录：{ date: "2026-2-5", count: 1 }
-    let drawRecord = JSON.parse(ext.storageGet(`draw_rec_${uid}`) || `{"date":"","count":0}`);
-    
-    // 如果日期不是今天，重置计数
-    if (drawRecord.date !== today) {
-        drawRecord = { date: today, count: 0 };
-    }
+    // 读取抽取记录
+    let records = ItemRoleUtils.getGlobalRecords();
+    let myRec = records[roleKey] || { date: "", count: 0 };
+    if (myRec.date !== today) myRec = { date: today, count: 0 };
 
-    // 检查是否达到上限
-    if (drawRecord.count >= limit) {
-        seal.replyToSender(ctx, msg, `⚠️ 抽取失败：你今天已经抽过 ${limit} 次了，请明天再来。`);
+    if (myRec.count >= limit) {
+        seal.replyToSender(ctx, msg, `⚠️ 你今日抽取次数已达上限(${limit})。`);
         return seal.ext.newCmdExecuteResult(true);
     }
 
-    let pool = getPoolData();
-    if (pool.length === 0) {
-        seal.replyToSender(ctx, msg, "❌ 抽取失败：池子空了。");
-        return seal.ext.newCmdExecuteResult(true);
-    }
+    let pool = ItemRoleUtils.getPool();
+    if (pool.length === 0) return seal.replyToSender(ctx, msg, "❌ 物资池已空。");
 
-    // 执行抽取
     const index = Math.floor(Math.random() * pool.length);
     const item = pool.splice(index, 1)[0];
-    setPoolData(pool);
+    ItemRoleUtils.setPool(pool);
 
-    // 更新玩家背包
-    let inv = getPlayerInv(uid);
+    // 存入背包
+    let inv = ItemRoleUtils.getInv(roleKey);
     inv.push(item);
-    setPlayerInv(uid, inv);
+    ItemRoleUtils.setInv(roleKey, inv);
 
-    // 更新今日抽取计数
-    drawRecord.count += 1;
-    ext.storageSet(`draw_rec_${uid}`, JSON.stringify(drawRecord));
+    // 更新记录
+    myRec.count += 1;
+    records[roleKey] = myRec;
+    ItemRoleUtils.setGlobalRecords(records);
 
-    seal.replyToSender(ctx, msg, `🎁 获得：【${item.name}】\n描述：${item.desc}\n(今日已抽 ${drawRecord.count}/${limit})`);
+    const name = roleKey.split(":")[1];
+    seal.replyToSender(ctx, msg, `🎁 【${name}】获得了：【${item.name}】\n描述：${item.desc}\n(今日进度: ${myRec.count}/${limit})`);
     return seal.ext.newCmdExecuteResult(true);
 };
 ext.cmdMap["抽取"] = cmd_item_draw;
 
-// === 3. 玩家指令：背包 ===
+// === 玩家指令：背包 ===
 let cmd_item_inv = seal.ext.newCmdItemInfo();
 cmd_item_inv.name = "背包";
-cmd_item_inv.solve = (ctx, msg, cmdArgs) => {
-    let inv = getPlayerInv(ctx.player.userId);
-    if (inv.length === 0) {
-        seal.replyToSender(ctx, msg, "你的背包空空如也。");
-    } else {
-        let text = `🎒 ${ctx.player.name} 的背包：\n`;
-        inv.forEach((item, idx) => {
-            text += `${idx + 1}. ${item.name} ${item.used ? "[已使用]" : ""}\n   └ ${item.desc}\n`;
-        });
-        seal.replyToSender(ctx, msg, text.trim());
-    }
+cmd_item_inv.solve = (ctx, msg) => {
+    const roleKey = ItemRoleUtils.getRoleKey(ctx, msg);
+    if (!roleKey) return seal.replyToSender(ctx, msg, "⚠️ 请先绑定角色。");
+
+    let inv = ItemRoleUtils.getInv(roleKey);
+    const name = roleKey.split(":")[1];
+    if (inv.length === 0) return seal.replyToSender(ctx, msg, `🎒 【${name}】的背包空空如也。`);
+
+    let text = `🎒 【${name}】的背包：\n`;
+    inv.forEach((item, idx) => {
+        text += `${idx + 1}. ${item.name}${item.used ? " [已使用]" : ""}\n   └ ${item.desc}\n`;
+    });
+    seal.replyToSender(ctx, msg, text.trim());
     return seal.ext.newCmdExecuteResult(true);
 };
 ext.cmdMap["背包"] = cmd_item_inv;
 
-// === 4. 玩家指令：使用 ===
-let cmd_item_use = seal.ext.newCmdItemInfo();
-cmd_item_use.name = "使用";
-cmd_item_use.solve = (ctx, msg, cmdArgs) => {
-    const name = cmdArgs.getArgN(1);
-    let inv = getPlayerInv(ctx.player.userId);
-    const item = inv.find(i => i.name === name && !i.used);
-    if (item) {
-        item.used = true;
-        setPlayerInv(ctx.player.userId, inv);
-        seal.replyToSender(ctx, msg, `⚙️ 你使用了【${name}】，已打上标记。`);
-    } else {
-        seal.replyToSender(ctx, msg, `❌ 找不到未使用的【${name}】。`);
-    }
-    return seal.ext.newCmdExecuteResult(true);
-};
-ext.cmdMap["使用"] = cmd_item_use;
-
-// === 5. 玩家指令：赠送 ===
+// === 玩家指令：赠送 ===
 let cmd_item_give = seal.ext.newCmdItemInfo();
 cmd_item_give.name = "赠送";
 cmd_item_give.solve = (ctx, msg, cmdArgs) => {
+    const myKey = ItemRoleUtils.getRoleKey(ctx, msg);
     const targetName = cmdArgs.getArgN(1);
     const itemName = cmdArgs.getArgN(2);
-    if (!targetName || !itemName) {
-        seal.replyToSender(ctx, msg, "用法：。赠送 对方名字 物品名");
-        return seal.ext.newCmdExecuteResult(true);
-    }
-    const members = ctx.group.getMemberList();
-    let target = null;
-    for (let i = 0; i < members.length; i++) {
-        const m = members[i];
-        if (m.card === targetName || m.nickname === targetName) {
-            target = m;
-            break; 
-        }
-    }
-    if (!target) {
-        seal.replyToSender(ctx, msg, `❌ 找不到名为“${targetName}”的成员。`);
-    } else if (target.userId === ctx.player.userId) {
-        seal.replyToSender(ctx, msg, "不能送给自己哦。");
+    const platform = msg.platform;
+
+    if (!myKey) return seal.replyToSender(ctx, msg, "⚠️ 请先绑定角色。");
+    const targetKey = `${platform}:${targetName}`;
+
+    // 检查目标是否存在
+    const a_private_group = JSON.parse(ext.storageGet("a_private_group") || "{}");
+    if (!a_private_group[platform]?.[targetName]) return seal.replyToSender(ctx, msg, `❌ 角色「${targetName}」不存在。`);
+    if (myKey === targetKey) return seal.replyToSender(ctx, msg, "⚠️ 不能送给自己。");
+
+    let myInv = ItemRoleUtils.getInv(myKey);
+    const idx = myInv.findIndex(i => i.name === itemName);
+
+    if (idx > -1) {
+        const item = myInv.splice(idx, 1)[0];
+        ItemRoleUtils.setInv(myKey, myInv);
+
+        let tInv = ItemRoleUtils.getInv(targetKey);
+        tInv.push(item);
+        ItemRoleUtils.setInv(targetKey, tInv);
+
+        seal.replyToSender(ctx, msg, `🤝 赠送成功！【${item.name}】已交给【${targetName}】。`);
     } else {
-        let myInv = getPlayerInv(ctx.player.userId);
-        const index = myInv.findIndex(i => i.name === itemName);
-        if (index > -1) {
-            const item = myInv.splice(index, 1)[0];
-            setPlayerInv(ctx.player.userId, myInv);
-            let targetInv = getPlayerInv(target.userId);
-            targetInv.push(item);
-            setPlayerInv(target.userId, targetInv);
-            seal.replyToSender(ctx, msg, `🤝 赠送成功！\n【${item.name}】已移交给 ${targetName}。`);
-        } else {
-            seal.replyToSender(ctx, msg, `❌ 你的背包里没有【${itemName}】。`);
-        }
+        seal.replyToSender(ctx, msg, `❌ 背包里没有【${itemName}】。`);
     }
     return seal.ext.newCmdExecuteResult(true);
 };
 ext.cmdMap["赠送"] = cmd_item_give;
+
+// === 4. 玩家指令：使用 (方案 C 修正版) ===
+let cmd_item_use = seal.ext.newCmdItemInfo();
+cmd_item_use.name = "使用";
+cmd_item_use.solve = (ctx, msg, cmdArgs) => {
+    const roleKey = ItemRoleUtils.getRoleKey(ctx, msg); // 使用 roleKey 标识
+    const itemName = cmdArgs.getArgN(1);
+    
+    if (!roleKey) return seal.replyToSender(ctx, msg, "⚠️ 请先绑定角色。");
+    if (!itemName) return seal.replyToSender(ctx, msg, "用法：。使用 物品名");
+
+    const roleName = roleKey.split(":")[1]; // 获取角色名用于回显
+    let inv = ItemRoleUtils.getInv(roleKey); // 统一调用方式
+    const item = inv.find(i => i.name === itemName && !i.used);
+    
+    if (item) {
+        item.used = true; // 标记为已使用
+        ItemRoleUtils.setInv(roleKey, inv); // 保存回全局大表
+        seal.replyToSender(ctx, msg, `⚙️ 【${roleName}】使用了【${itemName}】。`);
+    } else {
+        seal.replyToSender(ctx, msg, `❌ 背包中没有未使用的【${itemName}】。`);
+    }
+    return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap["使用"] = cmd_item_use;
 
 // ========================
 // 📞 盲盒电话系统配置
@@ -11876,3 +11890,425 @@ cmd_hangup_blind.solve = (ctx, msg, cmdArgs) => {
     return seal.ext.newCmdExecuteResult(true);
 };
 ext.cmdMap["挂断盲盒电话"] = cmd_hangup_blind;
+
+// ========================
+// 🍽️ 晚餐系统 v2.0 (带自动菜单功能)
+// ========================
+
+// 菜谱数据库
+const DINNER_MENUS = {
+    "现代中餐": [
+        "东坡肉", "宫保鸡丁", "清蒸鲈鱼", "麻婆豆腐", "蒜蓉西兰花", "腌笃鲜", "扬州炒饭", "北京烤鸭", 
+        "佛跳墙", "松鼠鳜鱼", "辣子鸡丁", "回锅肉", "地三鲜", "西湖牛肉羹", "糖醋排骨", "荷叶粉蒸肉", 
+        "白灼虾", "蚝油生菜", "黑椒牛柳", "赛螃蟹", "开水白菜", "虫草花炖鸡汤", "蜜汁叉烧", "金汤肥牛",
+        "蒜泥白肉", "响油鳝糊", "四喜丸子", "大煮干丝", "避风塘炒蟹", "文思豆腐", "酸菜鱼", "老鸭汤",
+        "麻辣小龙虾", "北京烤鸭", "西湖醋鱼", "金牌脆皮乳鸽", "剁椒鱼头", "上汤娃娃菜", "干炒牛河", 
+        "XO酱爆龙虾", "陈皮红豆沙", "杨枝甘露"
+    ],
+    "现代西餐": [
+        "惠灵顿牛排", "法式洋葱汤", "香煎干贝", "松露意面", "凯撒沙拉", "波士顿龙虾", "红酒炖牛肉", "提拉米苏", 
+        "奶油蘑菇汤", "战斧牛排", "芝士焗蜗牛", "玛格丽特披萨", "西班牙海鲜饭", "意式生牛肉片", "法式烤春鸡", 
+        "香煎三文鱼", "芦笋培根卷", "南瓜浓汤", "墨鱼汁面", "托斯卡纳炖鸡", "班尼迪克蛋", "维也纳炸牛排",
+        "澳洲和牛配芦笋", "海鲜周打汤", "法式油封鸭", "德式脆皮猪肘", "炭烤羊排", "英式炸鱼薯条", "马赛鱼汤",
+        "慢煮低温鲑鱼", "法式鹅肝配烤面包", "黑松露烩饭", "纽约芝士蛋糕", "舒芙蕾", "波尔多炖羊腱", "香煎比目鱼", 
+        "意式番茄罗勒浓汤", "生蚝拼盘", "焦糖布丁"
+    ],
+    "古代中餐": [
+        "花炊鹌子", "炙金肠", "洗手蟹", "羹腊兔", "莲花鸭签", "拨鱼儿", "玉灌肺", "金乳酥", 
+        "鹅鸭排蒸", "山煮羊", "螃蟹酿橙", "胡炮肉", "广利肉", "五味杏酪鹅", "荔枝白腰子", "绣球乾贝", 
+        "黄金鸡", "白云猪手", "瑞雪汤", "珍珠糜", "麒麟脯", "二十四桥明月夜", "剔缕鸡", "雪霞羹",
+        "羊皮太极软脂", "假蛤蜊", "酒炊淮白", "煿金煮玉", "拨霞供", "槐叶冷淘", "广寒糕", "煨芋头",
+        "广寒糕", "暗香汤", "蜜饯雕花", "胡饼", "驼蹄羹", "过门香", "通花软牛肠", "光明虾炙", "玉笛谁家听落梅", 
+        "好挺"
+    ],
+    "古代西餐": [
+        "烤野猪肉", "蜂蜜炖鹅", "香料葡萄酒", "中世纪黑面包", "麦芽糊", "盐渍鹿肉", "肉豆蔻烤鱼", "无花果挞", 
+        "炖孔雀", "孔雀开屏肉馅饼", "杏仁牛奶粥", "藏红花炖鸡", "肉桂烤苹果", "野味肉冻", "姜汁炖梨", 
+        "烤鲟鱼", "蜂蜜柠檬酒", "公鸡汤", "黄油烤野兔", "香草羊排", "烤大天鹅", "芜菁炖肉",
+        "大麦浓汤", "鼠尾草烤猪", "香草醋渍鲱鱼", "燕麦饼干", "杜松子烤肉", "黑布丁", "苹果酒炖蹄髈","盐烤整头公牛", 
+        "玫瑰水炖雏鸡", "龙涎香布丁", "香料馅饼", "酸葡萄汁煎肉", "欧当归炖鲜鱼", "藏红花杏仁奶油", "烤白鹭", "松露灰烬煨蛋", "多利亚式炸面团"
+    ],
+    "诡秘深渊": [
+        "不可名状的触手羹", "深潜者之卵", "米戈真菌刺身", "发光的紫色浓汤", "蠕动的肉块饼", "拉莱耶深海藻泥", 
+        "旧日支配者的低语吐司", "黄衣之王的祭礼酒", "混乱无序的炖煮", "疯狂的眼球果冻", "虚空行者的心脏",
+        "纳克亚之影的蛛丝糖", "修格斯半流体慕斯", "远古种族的遗迹罐头", "格拉基的尖刺烤串", "冷之高原的冻肉"
+    ],
+    "赛博未来": [
+        "合成蛋白块", "营养液胶囊(草莓味)", "人造合成和牛", "霓虹酒精饮料", "增强现实全息布丁", "高浓缩能量棒", 
+        "实验室培植细胞肉", "电子羊肉串", "0卡路里数字汽水", "金属味觉感官调节片", "深度冻结脱水蔬菜",
+        "仿生鳗鱼冻", "垃圾场回收零件餐(装饰用)", "神经连接感应咖啡", "纳米机器人清洁餐", "低层区大杂烩"
+    ]
+};
+/**
+ * 辅助函数：根据人数和年代生成随机菜单
+ */
+function generateRandomDishes(era, count) {
+    const pool = DINNER_MENUS[era] || ["家常小菜"];
+    let result = [];
+    // 菜品数量：基础5道 + 每3人加1道，上限不超过池子大小
+    const dishCount = Math.min(pool.length, 5 + Math.floor(count / 3));
+    
+    // 简单的随机打乱
+    let shuffled = [...pool].sort(() => 0.5 - Math.random());
+    return shuffled.slice(0, dishCount);
+}
+
+// 1. 指令：。开始晚餐 [人数] [年代]
+let cmd_start_dinner = seal.ext.newCmdItemInfo();
+cmd_start_dinner.name = "开始晚餐";
+// 更新帮助信息
+cmd_start_dinner.help = "。开始晚餐 [人数] [年代] —— 仅限管理员。\n年代可选：现代中餐、现代西餐、古代中餐、古代西餐、诡秘深渊、赛博未来、无菜";
+cmd_start_dinner.solve = (ctx, msg, cmdArgs) => {
+    // 权限校验
+    if (!isUserAdmin(ctx, msg)) {
+        seal.replyToSender(ctx, msg, "⚠️ 只有管理员可以开启晚餐。");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    let num = parseInt(cmdArgs.getArgN(1));
+    let era = cmdArgs.getArgN(2) || "现代中餐";
+
+    if (isNaN(num) || num <= 0) {
+        seal.replyToSender(ctx, msg, "❌ 格式错误。正确用法：.开始晚餐 8 现代中餐");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    // --- 新增：无菜模式判断 ---
+    let dishes = [];
+    let isNoDishMode = (era === "无" || era === "无菜");
+
+    if (!isNoDishMode) {
+        // 正常校验菜系是否存在
+        if (!DINNER_MENUS[era]) {
+            const availableEras = Object.keys(DINNER_MENUS).join("、");
+            seal.replyToSender(ctx, msg, `❌ 未知的年代菜系「${era}」。\n目前支持：${availableEras}、无菜`);
+            return seal.ext.newCmdExecuteResult(true);
+        }
+        // 正常生成菜品
+        dishes = generateRandomDishes(era, num);
+    }
+
+    let data = {
+        status: "开始",
+        max: num,
+        era: isNoDishMode ? "纯享入座" : era,
+        dishes: dishes,
+        list: new Array(num).fill(null)
+    };
+
+    // 保存状态
+    ext.storageSet("dinner_system_data", JSON.stringify(data));
+    ext.storageSet("dinner_global_status", "开始"); 
+
+    // 构建回复文本
+    let text = `🔔 【晚餐开始】\n`;
+    text += `风格：${data.era}\n`;
+    
+    // 如果不是无菜模式，才显示菜品清单
+    if (!isNoDishMode && dishes.length > 0) {
+        text += `菜品：${dishes.join("、")}\n`;
+    }
+    
+    text += "────────────────\n";
+    for (let i = 0; i < num; i++) {
+        text += `${i + 1}. （空位）\n`;
+    }
+    text += "\n💡 输入「.入座 编号」选择位置";
+
+    seal.replyToSender(ctx, msg, text);
+    return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap["开始晚餐"] = cmd_start_dinner;
+
+// 2. 指令：。入座 编号
+let cmd_sit_dinner = seal.ext.newCmdItemInfo();
+cmd_sit_dinner.name = "入座";
+cmd_sit_dinner.solve = (ctx, msg, cmdArgs) => {
+    let data = JSON.parse(ext.storageGet("dinner_system_data") || '{"status": "结束"}');
+
+    if (data.status !== "开始") {
+        seal.replyToSender(ctx, msg, "⚠️ 当前没有正在进行的晚餐。");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    let index = parseInt(cmdArgs.getArgN(1)) - 1;
+    if (isNaN(index) || index < 0 || index >= data.max) {
+        seal.replyToSender(ctx, msg, `❌ 请选择 1-${data.max} 之间的编号。`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    if (data.list[index]) {
+        seal.replyToSender(ctx, msg, `⚠️ ${index + 1}号位已有宾客。`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    // 获取角色名（使用您脚本中的逻辑）
+    const senderName = getRoleName(ctx, msg) || msg.sender.nickname;
+    
+    // 移除旧座位（防止一人多占）
+    for (let i = 0; i < data.list.length; i++) {
+        if (data.list[i] === senderName) data.list[i] = null;
+    }
+
+    data.list[index] = senderName;
+    ext.storageSet("dinner_system_data", JSON.stringify(data));
+
+    let text = `🍽️ 【晚餐清单 - ${data.era}】\n`;
+    text += `今日菜谱：${data.dishes.join("、")}\n`;
+    text += "────────────────\n";
+    for (let i = 0; i < data.max; i++) {
+        text += `${i + 1}. ${data.list[i] || "（空位）"}\n`;
+    }
+    
+    seal.replyToSender(ctx, msg, text);
+    return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap["入座"] = cmd_sit_dinner;
+
+// 3. 指令：。结束晚餐
+let cmd_end_dinner = seal.ext.newCmdItemInfo();
+cmd_end_dinner.name = "结束晚餐";
+cmd_end_dinner.solve = (ctx, msg) => {
+    if (!isUserAdmin(ctx, msg)) return seal.ext.newCmdExecuteResult(true);
+
+    ext.storageSet("dinner_system_data", JSON.stringify({status: "结束"}));
+    ext.storageSet("dinner_global_status", "结束");
+    seal.replyToSender(ctx, msg, "🏁 晚餐已结束，席位已清空。");
+    return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap["结束晚餐"] = cmd_end_dinner;
+
+// ========================
+// 🎭 指令：。设为npc [名字]
+// ========================
+let cmd_set_npc = seal.ext.newCmdItemInfo();
+cmd_set_npc.name = "设为npc";
+cmd_set_npc.help = "用法：.设为npc [角色名]\n说明：将角色标记为NPC，标记后该角色不会参与自动分组。再次输入可取消标记。";
+cmd_set_npc.solve = (ctx, msg, cmdArgs) => {
+    if (!isUserAdmin(ctx, msg)) {
+        seal.replyToSender(ctx, msg, "⚠️ 仅限管理员使用此功能。");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    let name = cmdArgs.getArgN(1);
+    if (!name) {
+        seal.replyToSender(ctx, msg, "❌ 请输入要操作的角色名。");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    let platform = msg.platform;
+    let storage = getRoleStorage();
+    let npcList = JSON.parse(ext.storageGet("a_npc_list") || "[]");
+
+    if (!storage[platform] || !storage[platform][name]) {
+        seal.replyToSender(ctx, msg, `❌ 未找到角色「${name}」，请先创建角色。`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    let index = npcList.indexOf(name);
+    if (index === -1) {
+        npcList.push(name);
+        ext.storageSet("a_npc_list", JSON.stringify(npcList));
+        seal.replyToSender(ctx, msg, `✅ 已将「${name}」设为 NPC，分组时将自动跳过。`);
+    } else {
+        npcList.splice(index, 1);
+        ext.storageSet("a_npc_list", JSON.stringify(npcList));
+        seal.replyToSender(ctx, msg, `✅ 已取消「${name}」的 NPC 身份。`);
+    }
+
+    return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap["设为npc"] = cmd_set_npc;
+
+// ========================
+// 🎲 指令：。随机分组 [组数]
+// ========================
+let cmd_random_group = seal.ext.newCmdItemInfo();
+cmd_random_group.name = "随机分组";
+cmd_random_group.help = "用法：.随机分组 [数字]\n说明：将所有非NPC玩家随机分配到指定数量的组中。";
+cmd_random_group.solve = (ctx, msg, cmdArgs) => {
+    if (!isUserAdmin(ctx, msg)) {
+        seal.replyToSender(ctx, msg, "⚠️ 仅限管理员使用分组功能。");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    let groupCount = parseInt(cmdArgs.getArgN(1));
+    if (isNaN(groupCount) || groupCount <= 0) {
+        seal.replyToSender(ctx, msg, "❌ 请输入正确的小组数量，例如：.随机分组 2");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    let platform = msg.platform;
+    let storage = getRoleStorage();
+    let npcList = JSON.parse(ext.storageGet("a_npc_list") || "[]");
+    
+    // 获取当前平台所有玩家，并剔除 NPC
+    let players = Object.keys(storage[platform] || {}).filter(name => !npcList.includes(name));
+
+    if (players.length === 0) {
+        seal.replyToSender(ctx, msg, "❌ 当前平台没有可分配的非NPC玩家。");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    if (groupCount > players.length) {
+        seal.replyToSender(ctx, msg, `❌ 组数(${groupCount})不能大于玩家总数(${players.length})。`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    // 洗牌算法 (Fisher-Yates Shuffle)
+    for (let i = players.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [players[i], players[j]] = [players[j], players[i]];
+    }
+
+    // 分配到小组
+    let groups = Array.from({ length: groupCount }, () => []);
+    players.forEach((player, index) => {
+        groups[index % groupCount].push(player);
+    });
+
+    // 构建回复文本
+    let response = `🎲 【随机分组结果】\n总人数：${players.length} | 组数：${groupCount}\n`;
+    response += "━━━━━━━━━━━━━━\n";
+    groups.forEach((members, i) => {
+        response += `第 ${i + 1} 组：${members.join("、")}\n`;
+    });
+    response += "━━━━━━━━━━━━━━";
+
+    seal.replyToSender(ctx, msg, response);
+    return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap["随机分组"] = cmd_random_group;
+
+let cmd_delete_timeline_precise = seal.ext.newCmdItemInfo();
+cmd_delete_timeline_precise.name = "删除时间线";
+cmd_delete_timeline_precise.help = "。删除时间线 天数 时间 角色名\n示例：。删除时间线 D1 14:00 张三";
+
+cmd_delete_timeline_precise.solve = (ctx, msg, cmdArgs) => {
+    if (!isUserAdmin(ctx, msg)) return seal.ext.newCmdExecuteResult(true);
+
+    const day = cmdArgs.getArgN(1);
+    const time = cmdArgs.getArgN(2);
+    const name = cmdArgs.getArgN(3);
+
+    if (!day || !time || !name) {
+        seal.replyToSender(ctx, msg, "⚠️ 参数不足！\n格式：。删除时间线 [天数] [时间] [角色名]");
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    let confirmed = JSON.parse(ext.storageGet("b_confirmedSchedule") || "{}");
+    const platform = msg.platform;
+    const privateGroups = JSON.parse(ext.storageGet("a_private_group") || "{}");
+
+    // 1. 定位目标角色的 UID
+    const targetUid = privateGroups?.[platform]?.[name]?.[0];
+    if (!targetUid) {
+        seal.replyToSender(ctx, msg, `❌ 未找到角色 ${name} 的注册信息。`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+    const targetKey = `${platform}:${targetUid}`;
+
+    // 2. 在该角色的日程里找到那场具体的“约会”
+    const userSchedule = confirmed[targetKey] || [];
+    const appointment = userSchedule.find(ev => ev.day === day && ev.time === time);
+
+    if (!appointment) {
+        seal.replyToSender(ctx, msg, `❌ 在 ${name} 的日程中未找到 ${day} ${time} 的记录。`);
+        return seal.ext.newCmdExecuteResult(true);
+    }
+
+    // 3. 提取这场约会涉及的所有人名
+    // 如果是单人约会，partner 是名字；如果是多人，你需要确保接受指令里存的是列表或者特殊标识
+    let participants = [name];
+    if (appointment.partner === "多人小群") {
+        // 如果是多人小群，逻辑上我们需要扫描全表，删除所有含有相同 group ID 的记录
+        const gid = appointment.group;
+        let deletedCount = 0;
+        for (let uid in confirmed) {
+            let before = confirmed[uid].length;
+            confirmed[uid] = confirmed[uid].filter(ev => ev.group !== gid);
+            if (confirmed[uid].length < before) deletedCount++;
+        }
+        ext.storageSet("b_confirmedSchedule", JSON.stringify(confirmed));
+        seal.replyToSender(ctx, msg, `✅ 已根据多人小群 ID(${gid}) 抹除所有参与者的排期（共 ${deletedCount} 人）。`);
+    } else {
+        // 如果是单人约会，精准删除这两个人的
+        const partnerName = appointment.partner;
+        const partnerUid = privateGroups?.[platform]?.[partnerName]?.[0];
+        const partnerKey = partnerUid ? `${platform}:${partnerUid}` : null;
+
+        // 删除发起人（张三）的
+        confirmed[targetKey] = confirmed[targetKey].filter(ev => !(ev.day === day && ev.time === time));
+        
+        // 删除对方的
+        if (partnerKey && confirmed[partnerKey]) {
+            confirmed[partnerKey] = confirmed[partnerKey].filter(ev => !(ev.day === day && ev.time === time));
+        }
+
+        ext.storageSet("b_confirmedSchedule", JSON.stringify(confirmed));
+        seal.replyToSender(ctx, msg, `✅ 已精准抹除 ${name} 与 ${partnerName} 在 ${day} ${time} 的约会记录。`);
+    }
+
+    return seal.ext.newCmdExecuteResult(true);
+};
+
+ext.cmdMap["删除时间线"] = cmd_delete_timeline_precise;
+/**
+ * 🆔 最终整合版：基于角色数据库的群名片同步
+ */
+function syncAllFromStorage(ctx, msg) {
+    // 💡 获取你自定义格式的存储数据 (注意：你的 getRoleStorage 函数必须保留)
+    const storage = getRoleStorage();
+    const platform = msg.platform || "QQ";
+    const platformData = storage[platform] || {};
+
+    const charNames = Object.keys(platformData);
+    if (charNames.length === 0) {
+        seal.replyToSender(ctx, msg, "📭 数据库中没有已注册的角色。");
+        return;
+    }
+
+    let count = 0;
+    charNames.forEach(name => {
+        // 根据你的 storage[platform][name] = [uid, gid] 结构提取
+        const uid = platformData[name][0];
+        const targetGid = platformData[name][1];
+
+        // 只有当 uid 和 gid 都有效时才下发改名指令
+        if (uid && targetGid && targetGid !== "0") {
+            const setCardPayload = {
+                "action": "set_group_card",
+                "params": {
+                    "group_id": parseInt(targetGid.toString().replace(/[^\d]/g, ""), 10),
+                    "user_id": parseInt(uid.toString().replace(/[^\d]/g, ""), 10),
+                    "card": name
+                }
+            };
+
+            // 发送修改名片请求
+            try {
+                ws(setCardPayload, ctx, { platform: platform, groupId: "" }, "");
+                count++;
+                console.log(`[名片同步] 成功：角色「${name}」 -> 群: ${targetGid}`);
+            } catch (e) {
+                console.log(`[名片同步] WS下发失败: ${e.message}`);
+            }
+        }
+    });
+
+    seal.replyToSender(ctx, msg, `🔄 名片同步指令已发出，已尝试更新 ${count} 个角色的群名片。`);
+}
+
+// ========================
+// 🛠️ 指令注册
+// ========================
+let cmd_sync_now = seal.ext.newCmdItemInfo();
+cmd_sync_now.name = "同步当前群名片"; 
+cmd_sync_now.solve = (ctx, msg, cmdArgs) => {
+    // 权限检查，确保只有管理员能大规模同步
+    if (!isUserAdmin(ctx, msg)) return seal.ext.newCmdExecuteResult(true);
+    
+    syncAllFromStorage(ctx, msg);
+    return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap["同步当前群名片"] = cmd_sync_now;
